@@ -1,9 +1,10 @@
 // AwareBC trail reports server (by Josh Singer). Free Cloudflare Worker + one KV namespace bound as REPORTS.
 // Stores trail status reports (status, tags, short note, one photo, exact spot) and their comments.
-// - Only answers the AwareBC website.  - Reports stay until someone marks them cleared.  - Photos arrive already shrunk and cleaned by the app.
+// - Only answers the AwareBC website.  - Reports stay until cleared; cleared reports stay 7 more days, then go.  - Photos arrive already shrunk and cleaned by the app.
 // - Limits per visitor: 6 reports, 40 comments, 30 clears an hour.  - 3 "report this" flags hide a post.  - Posters can delete their own.
 const ORIGIN = 'https://sinkid420.github.io';
 const MAX = 1000; // newest 1000 reports are kept
+const WEEK = 7 * 86400000; // cleared reports stay this long
 const ST = ['ok', 'warn', 'bad'];
 const TAGS = ['snow', 'washout', 'tree', 'mud', 'gate', 'fire', 'wildlife'];
 const hits = new Map();
@@ -29,7 +30,8 @@ function b64bytes(s, max) {
   return u[0] === 0xff && u[1] === 0xd8 ? u : null; // must be a real JPEG
 }
 async function getIdx(env) { const v = await env.REPORTS.get('idx', 'json'); return Array.isArray(v) ? v : []; }
-async function putIdx(env, a) { await env.REPORTS.put('idx', JSON.stringify(a.slice(-MAX))); try { await caches.default.delete(new Request('https://cache.local/idx')); } catch (e) {} }
+async function putIdx(env, a) { const old = Date.now() - WEEK, gone = a.filter(r => r.cl && r.cl < old); if (gone.length) { a = a.filter(r => !(r.cl && r.cl < old)); await Promise.all(gone.flatMap(r => ['p:', 't:', 'c:'].map(k => env.REPORTS.delete(k + r.id)))); }
+  await env.REPORTS.put('idx', JSON.stringify(a.slice(-MAX))); try { await caches.default.delete(new Request('https://cache.local/idx')); } catch (e) {} }
 async function body(req, max) { const t = await req.text(); if (t.length > max) throw new Error('too big'); return JSON.parse(t); }
 
 export default {
@@ -47,7 +49,8 @@ export default {
         const cache = caches.default, ck = new Request('https://cache.local/idx');
         let a, hit = await cache.match(ck);
         if (hit) a = await hit.json(); else { a = await getIdx(env); ctx.waitUntil(cache.put(ck, new Response(JSON.stringify(a), { headers: { 'Cache-Control': 'max-age=20' } }))); }
-        return json({ r: a.filter(r => !r.hid && r.lat >= s && r.lat <= n && r.lon >= w && r.lon <= e).map(r => ({ id: r.id, lat: r.lat, lon: r.lon, st: r.st, tg: r.tg, n: r.n, by: r.by, t: r.t, nc: r.nc || 0, ph: !!r.ph })) }, 200, 'max-age=15');
+        const old = Date.now() - WEEK;
+        return json({ r: a.filter(r => !r.hid && !(r.cl && r.cl < old) && r.lat >= s && r.lat <= n && r.lon >= w && r.lon <= e).map(r => ({ id: r.id, lat: r.lat, lon: r.lon, st: r.st, tg: r.tg, n: r.n, by: r.by, t: r.t, nc: r.nc || 0, ph: !!r.ph, cl: r.cl || 0, cb: r.cb || '' })) }, 200, 'max-age=15');
       }
       const mp = /^\/(photo|thumb)\/([a-z0-9]{8,20})$/.exec(p);
       if (req.method === 'GET' && mp) {
@@ -91,13 +94,14 @@ export default {
         r.fl = r.fl || []; const who = (await sha(ip)).slice(0, 12); if (!r.fl.includes(who)) r.fl.push(who); if (r.fl.length >= 3) r.hid = true;
         await putIdx(env, a); return json({ ok: true });
       }
-      // anyone can mark a report cleared (the problem is gone): it comes off the map
+      // anyone can mark a report cleared (the problem is gone): it shows as cleared for a week, then goes
       const mx = /^\/clear\/([a-z0-9]{8,20})$/.exec(p);
       if (req.method === 'POST' && mx) {
         if (limited(ip, 'x', 30)) return err('Too many clears this hour.', 429);
-        const a = await getIdx(env), i = a.findIndex(q => q.id === mx[1]); if (i < 0) return err('already cleared', 404);
-        a.splice(i, 1); await putIdx(env, a); ctx.waitUntil(Promise.all(['p:', 't:', 'c:'].map(k => env.REPORTS.delete(k + mx[1]))));
-        return json({ ok: true });
+        const a = await getIdx(env), r = a.find(q => q.id === mx[1]); if (!r || r.cl) return err('already cleared', 404);
+        let b = {}; try { b = await body(req, 500); } catch (e) {}
+        r.cl = Date.now(); r.cb = clean(b.by, 24) || 'Trail user'; await putIdx(env, a);
+        return json({ ok: true, cl: r.cl });
       }
       // delete your own report (the app keeps a private key for each report you post)
       const md = /^\/del\/([a-z0-9]{8,20})$/.exec(p);
