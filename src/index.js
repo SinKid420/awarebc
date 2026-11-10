@@ -47,6 +47,21 @@ const TA = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 // rider id from the phone's secret key: fingerprint (kept) + 4-letter tag (shown). The key itself is never stored.
 async function rider(b) { const k = clean(b && b.uid, 64); if (k.length < 16) return null; const h = await sha('awarebc-rider:' + k), t = await sha('awarebc-tag:' + k);
   let n = parseInt(t.slice(0, 5), 16), tag = ''; for (let i = 0; i < 4; i++) { tag = TA[n & 31] + tag; n >>= 5; } return { u: h.slice(0, 24), t: tag }; }
+// Reports are saved in the Hub's database: Cloudflare's free KV only allows 1,000 saves a day (and 1 a second per key).
+// Anything saved before the move is read from KV once and copied over; deleted keys are remembered so old copies never come back.
+function store(env) {
+  const KV = env.REPORTS, HUB = env.HUB; if (!HUB) return KV;
+  const call = (op, k, b) => HUB.get(HUB.idFromName('hub')).fetch(new Request('https://hub/_kv?op=' + op + '&k=' + encodeURIComponent(k), { method: 'POST', body: b == null ? null : b }));
+  const as = async (r, type) => { if (type === 'arrayBuffer') return await r.arrayBuffer(); const t = await r.text(); return type === 'json' ? JSON.parse(t) : t; };
+  return {
+    async get(k, type) {
+      const r = await call('get', k); if (r.status === 200) return as(r, type); if (r.status === 410 || !KV) return null;
+      const v = await KV.get(k, 'arrayBuffer'); if (v == null) return null; await call('put', k, v); return as(new Response(v), type);
+    },
+    async put(k, v) { await call('put', k, v); },
+    async delete(k) { await call('del', k); }
+  };
+}
 async function getIdx(env) { const v = await env.REPORTS.get('idx', 'json'); return Array.isArray(v) ? v : []; }
 async function putIdx(env, a) { const old = Date.now() - WEEK, gone = a.filter(r => r.cl && r.cl < old); if (gone.length) { a = a.filter(r => !(r.cl && r.cl < old)); await Promise.all(gone.flatMap(r => ['p:', 't:', 'c:'].map(k => env.REPORTS.delete(k + r.id)))); }
   await env.REPORTS.put('idx', JSON.stringify(a.slice(-MAX))); try { await caches.default.delete(new Request('https://cache.local/idx')); } catch (e) {} }
@@ -54,6 +69,7 @@ async function body(req, max) { const t = await req.text(); if (t.length > max) 
 
 export default {
   async fetch(req, env, ctx) {
+    if (env.HUB) env = Object.assign({}, env, { REPORTS: store(env) });
     // flight relay: https://<this server>/?u=<feed address>  (and ?phone=)
     { const q0 = new URL(req.url); if (q0.pathname === '/' && (q0.searchParams.has('u') || q0.searchParams.has('phone'))) return relay.fetch(req, env, ctx); }
     const origin = req.headers.get('Origin') || '';
@@ -168,7 +184,8 @@ export class Hub {
       CREATE TABLE IF NOT EXISTS reads (u TEXT, chat TEXT, last INTEGER, PRIMARY KEY (u, chat));
       CREATE TABLE IF NOT EXISTS blocks (a TEXT, b TEXT, t INTEGER, PRIMARY KEY (a, b));
       CREATE INDEX IF NOT EXISTS blocks_b ON blocks(b);
-      CREATE TABLE IF NOT EXISTS flags (u TEXT, by TEXT, ih TEXT, why TEXT, x TEXT, t INTEGER, PRIMARY KEY (u, by));`);
+      CREATE TABLE IF NOT EXISTS flags (u TEXT, by TEXT, ih TEXT, why TEXT, x TEXT, t INTEGER, PRIMARY KEY (u, by));
+      CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v BLOB, d INTEGER DEFAULT 0, t INTEGER);`);
     for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
     try { state.storage.getAlarm().then(a => { if (!a) state.storage.setAlarm(Date.now() + DAY); }).catch(() => {}); } catch (e) {}
   }
@@ -210,7 +227,15 @@ export class Hub {
     } finally { await this.state.storage.setAlarm(now + DAY); }
   }
   async fetch(req) {
-    if (new URL(req.url).pathname === '/_lim') { // only the worker above can reach this (public requests to the Hub must start with /s/)
+    const iu = new URL(req.url);
+    if (iu.pathname === '/_kv') { // trail reports storage, only reachable from the worker above
+      const op = iu.searchParams.get('op'), k = String(iu.searchParams.get('k') || '').slice(0, 200), now = Date.now();
+      if (op === 'get') { const r = this.q('SELECT v, d FROM kv WHERE k=?', k)[0]; if (!r) return new Response(null, { status: 404 }); if (r.d) return new Response(null, { status: 410 }); return new Response(r.v); }
+      if (op === 'put') { const b = new Uint8Array(await req.arrayBuffer()); this.sql.exec('INSERT INTO kv (k, v, d, t) VALUES (?, ?, 0, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, d=0, t=excluded.t', k, b, now); return new Response('ok'); }
+      if (op === 'del') { this.sql.exec('INSERT INTO kv (k, v, d, t) VALUES (?, NULL, 1, ?) ON CONFLICT(k) DO UPDATE SET v=NULL, d=1, t=excluded.t', k, now); return new Response('ok'); }
+      return new Response(null, { status: 400 });
+    }
+    if (iu.pathname === '/_lim') { // only the worker above can reach this (public requests to the Hub must start with /s/)
       let q = {}; try { q = await req.json(); } catch (e) {}
       const x = this.lim('L' + String(q.k || '').slice(0, 90), +q.max || 1, HOUR) || this.lim('LG' + String(q.g || ''), +q.gmax || 1000, DAY);
       return new Response(JSON.stringify({ x }));
