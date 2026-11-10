@@ -16,6 +16,16 @@ function limited(ip, kind, max) {
   if (!h || h.w !== w) { hits.set(k, { w, n: 1 }); if (hits.size > 5000) hits.clear(); return false; }
   return ++h.n > max;
 }
+// Limits are counted in one place (the Hub), so they hold across all of Cloudflare's servers, plus a daily cap for the whole app.
+const GCAP = { r: 400, c: 2000, f: 600, x: 600 };
+async function lim(env, ip, kind, max) {
+  if (limited(ip, kind, max)) return true;
+  if (!env.HUB) return false;
+  try {
+    const r = await env.HUB.get(env.HUB.idFromName('hub')).fetch(new Request('https://hub/_lim', { method: 'POST', body: JSON.stringify({ k: kind + ip, max, g: kind, gmax: GCAP[kind] || 1000 }) }));
+    return !!(await r.json()).x;
+  } catch (e) { return false; }
+}
 function hdr(extra) {
   return Object.assign({ 'Access-Control-Allow-Origin': ORIGIN, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Max-Age': '86400', 'Vary': 'Origin',
@@ -67,9 +77,9 @@ export default {
       }
       // new report
       if (req.method === 'POST' && p === '/report') {
-        if (limited(ip, 'r', 6)) return err('Too many reports this hour. Try again later.', 429);
+        if (await lim(env, ip, 'r', 6)) return err('Too many reports this hour. Try again later.', 429);
         const b = await body(req, 700000), me = await rider(b);
-        if (me && limited(me.u, 'r', 6)) return err('Too many reports this hour. Try again later.', 429);
+        if (me && await lim(env, me.u, 'r', 6)) return err('Too many reports this hour. Try again later.', 429);
         const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180), st = ST.includes(b.st) ? b.st : null;
         if (lat == null || lon == null || !st) return err('missing spot or status');
         const r = { id: rid(), lat: +lat.toFixed(5), lon: +lon.toFixed(5), st, tg: (Array.isArray(b.tg) ? b.tg : []).filter(t => TAGS.includes(t)).slice(0, 7),
@@ -86,7 +96,7 @@ export default {
         const id = mc[1];
         if (req.method === 'GET') { const c = await env.REPORTS.get('c:' + id, 'json'); return json({ c: (c || []).filter(x => !x.hid).map(x => ({ by: x.by, x: x.x, t: x.t, ut: x.ut || '' })) }); }
         if (req.method === 'POST') {
-          if (limited(ip, 'c', 40)) return err('Too many comments this hour.', 429);
+          if (await lim(env, ip, 'c', 40)) return err('Too many comments this hour.', 429);
           const b = await body(req, 4000), x = clean(b.text, 300), me = await rider(b); if (!x) return err('empty comment');
           const a = await getIdx(env), r = a.find(q => q.id === id); if (!r || r.hid) return err('report not found', 404);
           const c = (await env.REPORTS.get('c:' + id, 'json')) || []; c.push({ by: clean(b.by, 24) || 'Trail user', x, t: Date.now(), u: me ? me.u : '', ut: me ? me.t : '' });
@@ -97,7 +107,7 @@ export default {
       // flag a report (3 flags hides it)
       const mf = /^\/flag\/([a-z0-9]{8,20})$/.exec(p);
       if (req.method === 'POST' && mf) {
-        if (limited(ip, 'f', 20)) return err('Too many flags.', 429);
+        if (await lim(env, ip, 'f', 20)) return err('Too many flags.', 429);
         const a = await getIdx(env), r = a.find(q => q.id === mf[1]); if (!r) return err('not found', 404);
         r.fl = r.fl || []; const who = (await sha(ip)).slice(0, 12); if (!r.fl.includes(who)) r.fl.push(who); if (r.fl.length >= 3) r.hid = true;
         await putIdx(env, a); return json({ ok: true });
@@ -105,7 +115,7 @@ export default {
       // anyone can mark a report cleared (the problem is gone): it shows as cleared for a week, then goes
       const mx = /^\/clear\/([a-z0-9]{8,20})$/.exec(p);
       if (req.method === 'POST' && mx) {
-        if (limited(ip, 'x', 30)) return err('Too many clears this hour.', 429);
+        if (await lim(env, ip, 'x', 30)) return err('Too many clears this hour.', 429);
         const a = await getIdx(env), r = a.find(q => q.id === mx[1]); if (!r || r.cl) return err('already cleared', 404);
         let b = {}; try { b = await body(req, 500); } catch (e) {}
         const me = await rider(b), who = me ? me.u : 'ip' + (await sha(ip)).slice(0, 12), own = !!(me && r.u && me.u === r.u);
@@ -197,6 +207,11 @@ export class Hub {
     } finally { await this.state.storage.setAlarm(now + DAY); }
   }
   async fetch(req) {
+    if (new URL(req.url).pathname === '/_lim') { // only the worker above can reach this (public requests to the Hub must start with /s/)
+      let q = {}; try { q = await req.json(); } catch (e) {}
+      const x = this.lim('L' + String(q.k || '').slice(0, 90), +q.max || 1, HOUR) || this.lim('LG' + String(q.g || ''), +q.gmax || 1000, DAY);
+      return new Response(JSON.stringify({ x }));
+    }
     const p = new URL(req.url).pathname.slice(3), now = Date.now(), ip = req.headers.get('CF-Connecting-IP') || 'x';
     let b; try { b = await body(req, 8000); } catch (e) { return err('bad request'); }
     const me = await rider(b); if (!me) return err('rider key missing');
