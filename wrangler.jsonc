@@ -2,5 +2,7 @@
   "name": "awarebc",
   "main": "src/index.js",
   "compatibility_date": "2025-10-01",
-  "kv_namespaces": [{ "binding": "REPORTS","id": "a2c26eb5d2cf4a1287312e8888f89d91" }]
+  "kv_namespaces": [{ "binding": "REPORTS","id": "a2c26eb5d2cf4a1287312e8888f89d91" }],
+  "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "Hub" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }]
 }
