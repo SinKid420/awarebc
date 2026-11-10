@@ -5,6 +5,7 @@
 // - Rider tags: each phone keeps a secret key; the server keeps only its fingerprint and shows a short tag (e.g. Boss #4K7Q) that can't be copied.
 // - Danger reports (Caution / Blocked) need the poster, or 2 different riders, to clear them.  - 3+ reports earns a "trusted" tick.
 // - Friends: add by rider tag, see accepted friends' spots (only while they share), chat 1-to-1 and in groups (class Hub below).
+import relay from './relay.js'; // flight relay (was the separate skyrelay server)
 const ORIGIN = 'https://sinkid420.github.io';
 const MAX = 1000; // newest 1000 reports are kept
 const WEEK = 7 * 86400000; // cleared reports stay this long
@@ -53,6 +54,8 @@ async function body(req, max) { const t = await req.text(); if (t.length > max) 
 
 export default {
   async fetch(req, env, ctx) {
+    // flight relay: https://<this server>/?u=<feed address>  (and ?phone=)
+    { const q0 = new URL(req.url); if (q0.pathname === '/' && (q0.searchParams.has('u') || q0.searchParams.has('phone'))) return relay.fetch(req, env, ctx); }
     const origin = req.headers.get('Origin') || '';
     if (req.method === 'OPTIONS') return new Response(null, { status: origin === ORIGIN ? 204 : 403, headers: hdr() });
     if (origin !== ORIGIN && !(req.method === 'GET' && /^\/(photo|thumb)\//.test(new URL(req.url).pathname))) return err('not allowed', 403);
