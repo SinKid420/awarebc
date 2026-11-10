@@ -132,11 +132,17 @@ export default {
 
 // ---------- Friends, live spots and chat (one Durable Object with its own small SQL database) ----------
 // Only riders who accepted each other see each other's spot, and only while that rider has "Share my spot" on.
-const HOUR = 3600000, ONLINE = 5 * 60000, SPOT_AGE = 6 * HOUR;
+// Safety: block, report (3 different riders = chat paused 7 days), unsend, group owner can remove,
+// limits per rider AND per network, spot sharing turns itself off, old data is cleaned every day.
+const HOUR = 3600000, DAY = 24 * HOUR, ONLINE = 5 * 60000, SPOT_AGE = 6 * HOUR;
+const MSG_DAYS = 30, IDLE_DAYS = 365, FLAG_DAYS = 90, MUTE = 7 * DAY, MAX_FRIENDS = 500, MAX_GROUPS = 50;
+const WHY = ['spam', 'harass', 'scam', 'unsafe', 'other'];
+const ID = /^[0-9a-f]{24}$/, GID = /^[a-z0-9]{8,20}$/;
 const dmId = (a, b) => 'd:' + [a, b].sort().join(':');
+const RESERVED = /\b(admin|moderator|mod|awarebc|support|staff|official)\b/i;
 export class Hub {
   constructor(state, env) {
-    this.sql = state.storage.sql; this.hits = new Map();
+    this.state = state; this.env = env || {}; this.sql = state.storage.sql; this.hits = new Map();
     this.sql.exec(`CREATE TABLE IF NOT EXISTS riders (u TEXT PRIMARY KEY, t TEXT, n TEXT, seen INTEGER, share INTEGER DEFAULT 0, lat REAL, lon REAL, at INTEGER);
       CREATE INDEX IF NOT EXISTS riders_t ON riders(t);
       CREATE TABLE IF NOT EXISTS friends (a TEXT, b TEXT, st TEXT, t INTEGER, PRIMARY KEY (a, b));
@@ -146,88 +152,192 @@ export class Hub {
       CREATE INDEX IF NOT EXISTS gm_u ON gm(u);
       CREATE TABLE IF NOT EXISTS msgs (id INTEGER PRIMARY KEY AUTOINCREMENT, chat TEXT, u TEXT, n TEXT, tg TEXT, x TEXT, lat REAL, lon REAL, t INTEGER);
       CREATE INDEX IF NOT EXISTS msgs_chat ON msgs(chat, id);
-      CREATE TABLE IF NOT EXISTS reads (u TEXT, chat TEXT, last INTEGER, PRIMARY KEY (u, chat));`);
+      CREATE TABLE IF NOT EXISTS reads (u TEXT, chat TEXT, last INTEGER, PRIMARY KEY (u, chat));
+      CREATE TABLE IF NOT EXISTS blocks (a TEXT, b TEXT, t INTEGER, PRIMARY KEY (a, b));
+      CREATE INDEX IF NOT EXISTS blocks_b ON blocks(b);
+      CREATE TABLE IF NOT EXISTS flags (u TEXT, by TEXT, ih TEXT, why TEXT, x TEXT, t INTEGER, PRIMARY KEY (u, by));`);
+    for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
+    try { state.storage.getAlarm().then(a => { if (!a) state.storage.setAlarm(Date.now() + DAY); }).catch(() => {}); } catch (e) {}
   }
   q(s, ...a) { return this.sql.exec(s, ...a).toArray(); }
-  lim(k, max, win) { const w = Math.floor(Date.now() / win), h = this.hits.get(k); if (!h || h.w !== w) { this.hits.set(k, { w, n: 1 }); if (this.hits.size > 5000) this.hits.clear(); return false; } return ++h.n > max; }
+  lim(k, max, win) { const w = Math.floor(Date.now() / win), h = this.hits.get(k); if (!h || h.w !== w) { this.hits.set(k, { w, n: 1 }); if (this.hits.size > 20000) this.hits.clear(); return false; } return ++h.n > max; }
   friend(a, b) { return this.q("SELECT 1 FROM friends WHERE a=? AND b=? AND st='f'", a, b).length > 0; }
+  blocked(a, b) { return this.q('SELECT 1 FROM blocks WHERE (a=? AND b=?) OR (a=? AND b=?)', a, b, b, a).length > 0; }
+  admin(u) { return String(this.env.ADMINS || '').split(/[\s,]+/).includes(u); }
   canChat(me, chat) {
-    if (/^d:[0-9a-f]{24}:[0-9a-f]{24}$/.test(chat)) { const [, x, y] = chat.split(':'); const o = x === me ? y : y === me ? x : null; return !!o && this.friend(me, o); }
+    if (/^d:[0-9a-f]{24}:[0-9a-f]{24}$/.test(chat)) { const [, x, y] = chat.split(':'); const o = x === me ? y : y === me ? x : null; return !!o && this.friend(me, o) && !this.blocked(me, o); }
     if (/^g:[a-z0-9]{8,20}$/.test(chat)) return this.q('SELECT 1 FROM gm WHERE g=? AND u=?', chat.slice(2), me).length > 0;
     return false;
   }
+  shares(a, b) { return this.q('SELECT 1 FROM gm x JOIN gm y ON x.g=y.g WHERE x.u=? AND y.u=? LIMIT 1', a, b).length > 0; }
+  known(a, b) { return this.q('SELECT 1 FROM friends WHERE (a=? AND b=?) OR (a=? AND b=?)', a, b, b, a).length > 0 || this.shares(a, b); }
+  unfriend(a, b) { this.sql.exec('DELETE FROM friends WHERE (a=? AND b=?) OR (a=? AND b=?)', a, b, b, a); }
+  wipe(u) {
+    this.sql.exec('DELETE FROM friends WHERE a=? OR b=?', u, u); this.sql.exec('DELETE FROM reads WHERE u=?', u);
+    this.sql.exec('DELETE FROM blocks WHERE a=?', u); this.sql.exec('DELETE FROM flags WHERE by=?', u);
+    this.sql.exec("DELETE FROM msgs WHERE u=? OR chat LIKE ? OR chat LIKE ?", u, 'd:' + u + ':%', 'd:%:' + u);
+    this.q('SELECT g FROM gm WHERE u=?', u).forEach(r => this.leave(r.g, u));
+    this.sql.exec('DELETE FROM riders WHERE u=?', u);
+  }
+  leave(g, u) {
+    this.sql.exec('DELETE FROM gm WHERE g=? AND u=?', g, u);
+    const left = this.q('SELECT u FROM gm WHERE g=? LIMIT 1', g);
+    if (!left.length) { this.sql.exec('DELETE FROM groups WHERE g=?', g); this.sql.exec('DELETE FROM msgs WHERE chat=?', 'g:' + g); }
+    else this.sql.exec('UPDATE groups SET owner=? WHERE g=? AND owner=?', left[0].u, g, u); // owner left: next member takes over
+  }
+  // every day: old messages, riders gone a year, old reports and ended mutes are cleaned away
+  async alarm() {
+    const now = Date.now();
+    try {
+      this.sql.exec('DELETE FROM msgs WHERE t<?', now - MSG_DAYS * DAY);
+      this.sql.exec('DELETE FROM flags WHERE t<?', now - FLAG_DAYS * DAY);
+      this.sql.exec('UPDATE riders SET share=0, lat=NULL, lon=NULL WHERE share=1 AND ((until>0 AND until<?) OR at<?)', now, now - SPOT_AGE);
+      this.sql.exec('UPDATE riders SET mute=0 WHERE mute>0 AND mute<?', now);
+      this.q('SELECT u FROM riders WHERE seen<? LIMIT 500', now - IDLE_DAYS * DAY).forEach(r => this.wipe(r.u));
+    } finally { await this.state.storage.setAlarm(now + DAY); }
+  }
   async fetch(req) {
-    const p = new URL(req.url).pathname.slice(3), now = Date.now();
+    const p = new URL(req.url).pathname.slice(3), now = Date.now(), ip = req.headers.get('CF-Connecting-IP') || 'x';
     let b; try { b = await body(req, 8000); } catch (e) { return err('bad request'); }
     const me = await rider(b); if (!me) return err('rider key missing');
-    const U = me.u, name = clean(b.name, 24) || 'Rider';
-    if (this.lim('a' + U, 600, HOUR)) return err('Too many requests. Slow down a little.', 429);
-    this.sql.exec('INSERT INTO riders (u, t, n, seen) VALUES (?, ?, ?, ?) ON CONFLICT(u) DO UPDATE SET t=excluded.t, n=excluded.n, seen=excluded.seen', U, me.t, name, now);
+    const U = me.u, ih = (await sha('awarebc-ip:' + ip)).slice(0, 16), isAdmin = this.admin(U);
+    let name = clean(b.name, 24) || 'Rider'; if (RESERVED.test(name) && !isAdmin) name = 'Rider';
+    if (this.lim('a' + U, 600, HOUR) || this.lim('i' + ih, 3000, HOUR)) return err('Too many requests. Slow down a little.', 429);
+    const row = this.q('SELECT mute FROM riders WHERE u=?', U)[0];
+    if (!row) { // a brand-new rider: limit how many one network (or everyone) can make, so throw-away riders can't flood people
+      if (this.lim('n' + ih, 15, DAY) || this.lim('N', 400, HOUR)) return err('Too many new riders from this network today. Try again tomorrow.', 429);
+      this.sql.exec('INSERT INTO riders (u, t, n, seen, ih) VALUES (?, ?, ?, ?, ?)', U, me.t, name, now, ih);
+    } else this.sql.exec('UPDATE riders SET t=?, n=?, seen=?, ih=? WHERE u=?', me.t, name, now, ih, U);
+    const muted = row && row.mute > now ? row.mute : 0;
+    const paused = () => err('Your chat is paused until ' + new Date(muted).toISOString().slice(0, 10) + ' after reports from other riders.', 403);
+    const oid = () => { const o = String(b.id || ''); return ID.test(o) && o !== U ? o : null; };
+    const gid = () => { const g = String(b.g || ''); return GID.test(g) ? g : null; };
     if (p === 'sync') {
-      const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180);
-      if (b.share === false) this.sql.exec('UPDATE riders SET share=0 WHERE u=?', U);
-      else if (b.share === true && lat != null && lon != null) this.sql.exec('UPDATE riders SET share=1, lat=?, lon=?, at=? WHERE u=?', +lat.toFixed(5), +lon.toFixed(5), now, U);
-      else if (b.share === true) this.sql.exec('UPDATE riders SET share=1 WHERE u=?', U);
-      const fr = this.q("SELECT r.u, r.t, r.n, r.seen, r.share, r.lat, r.lon, r.at FROM friends f JOIN riders r ON r.u=f.b WHERE f.a=? AND f.st='f' ORDER BY r.seen DESC", U)
-        .map(r => ({ id: r.u, t: r.t, n: r.n, on: now - r.seen < ONLINE, seen: r.seen, chat: dmId(U, r.u), spot: r.share && r.at && now - r.at < SPOT_AGE ? { lat: r.lat, lon: r.lon, at: r.at } : null }));
-      const rq = this.q("SELECT r.u, r.t, r.n FROM friends f JOIN riders r ON r.u=f.a WHERE f.b=? AND f.st='p' ORDER BY f.t DESC LIMIT 20", U).map(r => ({ id: r.u, t: r.t, n: r.n }));
-      const sent = this.q("SELECT r.t, r.n FROM friends f JOIN riders r ON r.u=f.b WHERE f.a=? AND f.st='p' ORDER BY f.t DESC LIMIT 20", U).map(r => ({ t: r.t, n: r.n }));
-      const gr = this.q('SELECT g.g, g.name, (SELECT count(*) FROM gm x WHERE x.g=g.g) AS c FROM gm JOIN groups g ON g.g=gm.g WHERE gm.u=? ORDER BY g.t DESC', U).map(g => ({ id: g.g, n: g.name, c: g.c, chat: 'g:' + g.g }));
+      const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180), hrs = num(b.hours, 0, 24), until = hrs ? now + hrs * HOUR : 0;
+      if (b.share === false) this.sql.exec('UPDATE riders SET share=0, lat=NULL, lon=NULL, until=0 WHERE u=?', U);
+      else if (b.share === true) {
+        if (lat != null && lon != null) this.sql.exec('UPDATE riders SET share=1, lat=?, lon=?, at=? WHERE u=?', +lat.toFixed(5), +lon.toFixed(5), now, U);
+        else this.sql.exec('UPDATE riders SET share=1 WHERE u=?', U);
+        if (b.hours != null) this.sql.exec('UPDATE riders SET until=? WHERE u=?', until, U);
+      }
+      this.sql.exec('UPDATE riders SET share=0, lat=NULL, lon=NULL, until=0 WHERE u=? AND until>0 AND until<?', U, now); // timer ran out
+      const fr = this.q("SELECT r.u, r.t, r.n, r.seen, r.share, r.lat, r.lon, r.at, r.until FROM friends f JOIN riders r ON r.u=f.b WHERE f.a=? AND f.st='f' ORDER BY r.seen DESC", U)
+        .map(r => ({ id: r.u, t: r.t, n: r.n, on: now - r.seen < ONLINE, seen: r.seen, chat: dmId(U, r.u), spot: r.share && r.at && now - r.at < SPOT_AGE && !(r.until > 0 && r.until < now) ? { lat: r.lat, lon: r.lon, at: r.at } : null }));
+      const rq = this.q("SELECT r.u, r.t, r.n FROM friends f JOIN riders r ON r.u=f.a WHERE f.b=? AND f.st='p' AND f.a NOT IN (SELECT b FROM blocks WHERE a=?) ORDER BY f.t DESC LIMIT 20", U, U).map(r => ({ id: r.u, t: r.t, n: r.n }));
+      const sent = this.q("SELECT r.u, r.t, r.n FROM friends f JOIN riders r ON r.u=f.b WHERE f.a=? AND f.st='p' ORDER BY f.t DESC LIMIT 20", U).map(r => ({ id: r.u, t: r.t, n: r.n }));
+      const gr = this.q('SELECT g.g, g.name, g.owner, (SELECT count(*) FROM gm x WHERE x.g=g.g) AS c FROM gm JOIN groups g ON g.g=gm.g WHERE gm.u=? ORDER BY g.t DESC', U).map(g => ({ id: g.g, n: g.name, c: g.c, chat: 'g:' + g.g, own: g.owner === U }));
+      const bl = this.q('SELECT r.u, r.t, r.n FROM blocks k JOIN riders r ON r.u=k.b WHERE k.a=? ORDER BY k.t DESC', U).map(r => ({ id: r.u, t: r.t, n: r.n }));
       const chats = fr.map(f => f.chat).concat(gr.map(g => g.chat)), un = {};
-      if (chats.length) this.q('SELECT m.chat AS chat, count(*) AS c FROM msgs m LEFT JOIN reads r ON r.u=? AND r.chat=m.chat WHERE m.chat IN (' + chats.map(() => '?').join(',') + ') AND m.u<>? AND m.id>coalesce(r.last, 0) GROUP BY m.chat', U, ...chats, U).forEach(r => { un[r.chat] = r.c; });
-      const mine = this.q('SELECT share FROM riders WHERE u=?', U)[0] || {};
-      return json({ me: { t: me.t, n: name, share: !!mine.share }, friends: fr, req: rq, sent, groups: gr, unread: un, now });
+      if (chats.length) this.q('SELECT m.chat AS chat, count(*) AS c FROM msgs m LEFT JOIN reads r ON r.u=? AND r.chat=m.chat WHERE m.chat IN (' + chats.map(() => '?').join(',') + ') AND m.u<>? AND m.u NOT IN (SELECT b FROM blocks WHERE a=?) AND m.id>coalesce(r.last, 0) GROUP BY m.chat', U, ...chats, U, U).forEach(r => { un[r.chat] = r.c; });
+      const mine = this.q('SELECT share, until FROM riders WHERE u=?', U)[0] || {};
+      return json({ me: { t: me.t, n: name, id: U, share: !!mine.share, until: mine.until || 0, muted }, admin: isAdmin || undefined, friends: fr, req: rq, sent, groups: gr, blocked: bl, unread: un, now });
     }
     if (p === 'add') {
-      if (this.lim('f' + U, 30, HOUR)) return err('Too many friend requests this hour.', 429);
+      if (muted) return paused();
+      if (this.lim('f' + U, 30, HOUR) || this.lim('fi' + ih, 60, HOUR)) return err('Too many friend requests this hour.', 429);
       const t = String(b.tag || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4); if (t.length !== 4) return err('Enter a 4-letter rider tag, like 7QHD.');
       let c = this.q('SELECT u, n FROM riders WHERE t=? AND u<>?', t, U);
       if (!c.length) return err('No rider with tag #' + t + ' yet. They need to open AwareBC once.', 404);
       if (c.length > 1) { const nm = clean(b.who, 24).toLowerCase(); c = nm ? c.filter(r => String(r.n).toLowerCase() === nm) : []; if (c.length !== 1) return json({ ask: 'More than one rider has #' + t + '. Type their name too.' }); }
       const o = c[0].u;
+      if (this.q('SELECT 1 FROM blocks WHERE a=? AND b=?', U, o).length) return err('You blocked this rider. Unblock them first (Friends ▸ Blocked).');
       if (this.friend(U, o)) return json({ ok: true, msg: 'Already friends.' });
+      const sentMsg = { ok: true, msg: 'Request sent to ' + c[0].n + ' #' + t + '.' };
+      if (this.q('SELECT 1 FROM blocks WHERE a=? AND b=?', o, U).length) return json(sentMsg); // they blocked you: say nothing
+      if (this.q("SELECT count(*) AS c FROM friends WHERE a=? AND st='f'", U)[0].c >= MAX_FRIENDS) return err('You have the most friends allowed (' + MAX_FRIENDS + ').');
       if (this.q("SELECT 1 FROM friends WHERE a=? AND b=? AND st='p'", o, U).length) { this.sql.exec("DELETE FROM friends WHERE a=? AND b=?", o, U); this.sql.exec("INSERT OR REPLACE INTO friends VALUES (?, ?, 'f', ?), (?, ?, 'f', ?)", U, o, now, o, U, now); return json({ ok: true, msg: 'You are now friends with ' + c[0].n + '.' }); }
+      if (this.q("SELECT count(*) AS c FROM friends WHERE b=? AND st='p'", o)[0].c >= 50) return json(sentMsg); // their inbox is full: quietly drop
       this.sql.exec("INSERT OR IGNORE INTO friends VALUES (?, ?, 'p', ?)", U, o, now);
-      return json({ ok: true, msg: 'Request sent to ' + c[0].n + ' #' + t + '.' });
+      return json(sentMsg);
     }
     if (p === 'answer') {
-      const o = String(b.id || ''); if (!this.q("SELECT 1 FROM friends WHERE a=? AND b=? AND st='p'", o, U).length) return err('No request from that rider.', 404);
+      const o = oid(); if (!o || !this.q("SELECT 1 FROM friends WHERE a=? AND b=? AND st='p'", o, U).length) return err('No request from that rider.', 404);
       this.sql.exec('DELETE FROM friends WHERE a=? AND b=?', o, U);
       if (b.ok) this.sql.exec("INSERT OR REPLACE INTO friends VALUES (?, ?, 'f', ?), (?, ?, 'f', ?)", U, o, now, o, U, now);
       return json({ ok: true });
     }
-    if (p === 'remove') { const o = String(b.id || ''); this.sql.exec('DELETE FROM friends WHERE (a=? AND b=?) OR (a=? AND b=?)', U, o, o, U); return json({ ok: true }); }
+    if (p === 'remove') { const o = oid(); if (!o) return err('bad rider'); this.unfriend(U, o); return json({ ok: true }); }
+    if (p === 'cancel') { const o = oid(); if (o) this.sql.exec("DELETE FROM friends WHERE a=? AND b=? AND st='p'", U, o); return json({ ok: true }); }
+    if (p === 'block') { // they can't add you, message you, or see your spot; their messages are hidden for you
+      const o = oid(); if (!o || !this.q('SELECT 1 FROM riders WHERE u=?', o).length) return err('bad rider');
+      this.sql.exec('INSERT OR IGNORE INTO blocks VALUES (?, ?, ?)', U, o, now); this.unfriend(U, o); return json({ ok: true });
+    }
+    if (p === 'unblock') { const o = oid(); if (o) this.sql.exec('DELETE FROM blocks WHERE a=? AND b=?', U, o); return json({ ok: true }); }
+    if (p === 'report') { // 3 different riders (on different networks) reporting someone pauses their chat for 7 days
+      if (this.lim('r' + U, 20, DAY)) return err('Too many reports today.', 429);
+      const o = oid(); if (!o) return err('bad rider');
+      const why = WHY.includes(b.why) ? b.why : 'other';
+      let x = clean(b.note, 200);
+      if (b.mid != null) {
+        const m = this.q('SELECT chat, u, x FROM msgs WHERE id=?', +b.mid || 0)[0];
+        if (!m || m.u !== o || !this.canChat(U, m.chat)) return err('Message not found.', 404);
+        x = (clean(m.x, 300) + (x ? ' | ' + x : '')).slice(0, 400);
+      } else if (!this.known(U, o)) return err('You can only report riders you have been in contact with.', 403);
+      this.sql.exec('INSERT OR REPLACE INTO flags VALUES (?, ?, ?, ?, ?, ?)', o, U, ih, why, x, now);
+      const n = this.q('SELECT count(DISTINCT ih) AS c FROM flags WHERE u=? AND t>?', o, now - 30 * DAY)[0].c;
+      if (n >= 3) this.sql.exec('UPDATE riders SET mute=? WHERE u=? AND mute<?', now + MUTE, o, now);
+      if (b.block) { this.sql.exec('INSERT OR IGNORE INTO blocks VALUES (?, ?, ?)', U, o, now); this.unfriend(U, o); }
+      return json({ ok: true });
+    }
     if (p === 'msgs') {
       const chat = String(b.chat || ''); if (!this.canChat(U, chat)) return err('Not your chat.', 403);
-      const since = Math.max(0, +b.since || 0), rows = this.q('SELECT id, u, n, tg, x, lat, lon, t FROM msgs WHERE chat=? AND id>? ORDER BY id DESC LIMIT 100', chat, since).reverse();
-      if (rows.length) this.sql.exec('INSERT INTO reads (u, chat, last) VALUES (?, ?, ?) ON CONFLICT(u, chat) DO UPDATE SET last=max(last, excluded.last)', U, chat, rows[rows.length - 1].id);
-      let mem = null; if (chat[0] === 'g' && !since) mem = this.q('SELECT r.u, r.n, r.t FROM gm JOIN riders r ON r.u=gm.u WHERE gm.g=?', chat.slice(2)).map(r => ({ id: r.u, n: r.n, t: r.t, me: r.u === U }));
-      return json({ m: rows.map(r => ({ id: r.id, me: r.u === U, n: r.n, tg: r.tg, x: r.x, lat: r.lat, lon: r.lon, t: r.t })), mem });
+      const since = Math.max(0, +b.since || 0), rows = this.q('SELECT id, u, n, tg, x, lat, lon, t FROM msgs WHERE chat=? AND id>? AND u NOT IN (SELECT b FROM blocks WHERE a=?) ORDER BY id DESC LIMIT 100', chat, since, U).reverse();
+      const top = this.q('SELECT max(id) AS m FROM msgs WHERE chat=?', chat)[0].m;
+      if (top) this.sql.exec('INSERT INTO reads (u, chat, last) VALUES (?, ?, ?) ON CONFLICT(u, chat) DO UPDATE SET last=max(last, excluded.last)', U, chat, top);
+      let mem = null, own = false;
+      if (chat[0] === 'g' && !since) { own = !!this.q('SELECT 1 FROM groups WHERE g=? AND owner=?', chat.slice(2), U).length;
+        mem = this.q('SELECT r.u, r.n, r.t FROM gm JOIN riders r ON r.u=gm.u WHERE gm.g=?', chat.slice(2)).map(r => ({ id: r.u, n: r.n, t: r.t, me: r.u === U, fr: r.u !== U && this.friend(U, r.u) })); }
+      // ids of messages still here, so a message its writer unsent disappears for everyone
+      const keep = since ? this.q('SELECT id FROM msgs WHERE chat=? ORDER BY id DESC LIMIT 100', chat).map(r => r.id) : null;
+      return json({ m: rows.map(r => ({ id: r.id, me: r.u === U, a: r.u === U ? undefined : r.u, n: r.n, tg: r.tg, x: r.x, lat: r.lat, lon: r.lon, t: r.t })), mem, own, keep });
     }
     if (p === 'send') {
+      if (muted) return paused();
       const chat = String(b.chat || ''); if (!this.canChat(U, chat)) return err('Not your chat.', 403);
-      if (this.lim('m' + U, 60, 10 * 60000)) return err('Too many messages. Wait a few minutes.', 429);
+      if (this.lim('m' + U, 60, 10 * 60000) || this.lim('mi' + ih, 150, 10 * 60000)) return err('Too many messages. Wait a few minutes.', 429);
       const x = clean(b.text, 500), lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (!x && lat == null) return err('Empty message.');
       const r = this.q('INSERT INTO msgs (chat, u, n, tg, x, lat, lon, t) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id', chat, U, name, me.t, x, lat == null ? null : +lat.toFixed(5), lon == null ? null : +lon.toFixed(5), now)[0];
       this.sql.exec('INSERT INTO reads (u, chat, last) VALUES (?, ?, ?) ON CONFLICT(u, chat) DO UPDATE SET last=excluded.last', U, chat, r.id);
       if (r.id % 50 === 0) this.sql.exec('DELETE FROM msgs WHERE chat=? AND id < (SELECT id FROM msgs WHERE chat=? ORDER BY id DESC LIMIT 1 OFFSET 499)', chat, chat);
       return json({ ok: true, id: r.id, t: now });
     }
+    if (p === 'unsend') { this.sql.exec('DELETE FROM msgs WHERE id=? AND u=?', +b.mid || 0, U); return json({ ok: true }); }
     if (p === 'gnew') {
+      if (muted) return paused();
       if (this.lim('g' + U, 10, HOUR)) return err('Too many new groups this hour.', 429);
-      const gname = clean(b.gname, 30) || 'Riding group', ids = (Array.isArray(b.ids) ? b.ids : []).map(String).filter(o => this.friend(U, o)).slice(0, 29), g = rid();
+      if (this.q('SELECT count(*) AS c FROM gm WHERE u=?', U)[0].c >= MAX_GROUPS) return err('You are in the most groups allowed (' + MAX_GROUPS + '). Leave one first.');
+      const gname = clean(b.gname, 30) || 'Riding group', ids = [...new Set((Array.isArray(b.ids) ? b.ids : []).map(String))].filter(o => ID.test(o) && this.friend(U, o)).slice(0, 29), g = rid();
       this.sql.exec('INSERT INTO groups VALUES (?, ?, ?, ?)', g, gname, U, now); [U].concat(ids).forEach(o => this.sql.exec('INSERT OR IGNORE INTO gm VALUES (?, ?)', g, o));
       return json({ ok: true, id: g, chat: 'g:' + g });
     }
     if (p === 'gadd') {
-      const g = String(b.g || ''), o = String(b.id || ''); if (!this.q('SELECT 1 FROM gm WHERE g=? AND u=?', g, U).length) return err('Not your group.', 403);
+      if (muted) return paused();
+      const g = gid(), o = oid(); if (!g || !o || !this.q('SELECT 1 FROM gm WHERE g=? AND u=?', g, U).length) return err('Not your group.', 403);
       if (!this.friend(U, o)) return err('You can only add your friends.', 403);
       if (this.q('SELECT count(*) AS c FROM gm WHERE g=?', g)[0].c >= 30) return err('Groups hold up to 30 riders.');
+      if (this.q('SELECT count(*) AS c FROM gm WHERE u=?', o)[0].c >= MAX_GROUPS) return err('That rider is in too many groups.');
       this.sql.exec('INSERT OR IGNORE INTO gm VALUES (?, ?)', g, o); return json({ ok: true });
     }
-    if (p === 'gleave') {
-      const g = String(b.g || ''); this.sql.exec('DELETE FROM gm WHERE g=? AND u=?', g, U);
-      if (!this.q('SELECT 1 FROM gm WHERE g=?', g).length) { this.sql.exec('DELETE FROM groups WHERE g=?', g); this.sql.exec('DELETE FROM msgs WHERE chat=?', 'g:' + g); }
+    if (p === 'gkick') { // only the group's owner can remove someone
+      const g = gid(), o = oid(); if (!g || !o || !this.q('SELECT 1 FROM groups WHERE g=? AND owner=?', g, U).length) return err('Only the group owner can remove riders.', 403);
+      this.sql.exec('DELETE FROM gm WHERE g=? AND u=?', g, o); return json({ ok: true });
+    }
+    if (p === 'gleave') { const g = gid(); if (g) this.leave(g, U); return json({ ok: true }); }
+    if (p === 'wipe') { this.wipe(U); return json({ ok: true }); } // delete everything about this rider from the friends server
+    if (p === 'mod') { // moderators only (their rider IDs are listed in ADMINS)
+      if (!isAdmin) return err('not found', 404);
+      if (b.op === 'list') {
+        const r = this.q('SELECT f.u, r.n, r.t, r.mute, count(DISTINCT f.ih) AS c, max(f.t) AS last FROM flags f LEFT JOIN riders r ON r.u=f.u GROUP BY f.u ORDER BY last DESC LIMIT 50')
+          .map(x => ({ id: x.u, n: x.n, t: x.t, mute: x.mute || 0, c: x.c, last: x.last, why: this.q('SELECT why, x, t FROM flags WHERE u=? ORDER BY t DESC LIMIT 5', x.u) }));
+        const st = { riders: this.q('SELECT count(*) AS c FROM riders')[0].c, week: this.q('SELECT count(*) AS c FROM riders WHERE seen>?', now - 7 * DAY)[0].c, msgs: this.q('SELECT count(*) AS c FROM msgs WHERE t>?', now - DAY)[0].c };
+        return json({ flags: r, st });
+      }
+      const o = String(b.id || ''); if (!ID.test(o)) return err('bad rider');
+      if (b.op === 'mute') this.sql.exec('UPDATE riders SET mute=? WHERE u=?', now + (num(b.days, 1, 3650) || 7) * DAY, o);
+      else if (b.op === 'unmute') this.sql.exec('UPDATE riders SET mute=0 WHERE u=?', o);
+      else if (b.op === 'clear') this.sql.exec('DELETE FROM flags WHERE u=?', o);
+      else if (b.op === 'wipe') this.wipe(o);
+      else return err('bad op');
       return json({ ok: true });
     }
     return err('not found', 404);
