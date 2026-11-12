@@ -62,7 +62,7 @@ const d = raw.replace(/^\+?1(?=\d{10}$)/, '');
 if (/^[2-9]\d{2}[2-9]\d{6}$/.test(d)) add(fmtNanp(d.slice(0, 3), d.slice(3, 6), d.slice(6)), 10);
 else if (/^\+\d{8,15}$/.test(raw)) add(raw, 8);
 }
-const text = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<!--[\s\S]*?-->/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ');
+const text = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<!--[\s\S]*?-->/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/g, ' ').replace(/&amp;/g, '&').replace(/&[nm]dash;/g, '–').replace(/&#?\w+;/g, ' ').replace(/\s+/g, ' ');
 const near = (i) => text.slice(Math.max(0, i - 60), i).toLowerCase();
 for (const m of text.matchAll(NANP)) {
 const ctx = near(m.index); if (/fax/.test(ctx.slice(-25))) continue;
@@ -157,6 +157,29 @@ if (request.method !== 'GET') return reply('GET only', 405, allowOrigin);
 if (!okOrigin) return reply('Not allowed', 403, allowOrigin);
 const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
 const q = new URL(request.url).searchParams;
+if (q.has('flood')) { // BC River Forecast Centre: flood warnings, watches and high streamflow advisories in effect
+if (tooMany(ip, phoneHits, PHONE_PER_MIN)) return reply('Slow down', 429, allowOrigin, { 'Retry-After': '30' });
+const key = new Request('https://flood.cache/bc');
+let hit = await caches.default.match(key), body;
+if (hit) body = await hit.text();
+else {
+let out = { at: Date.now(), items: [] };
+try {
+const r = await fetch('https://bcrfc.env.gov.bc.ca/warnings/index.htm', { headers: { 'User-Agent': 'AwareBC/1.0 (flood advisories)', 'Accept': 'text/html' } });
+if (r.ok) { const html = (await r.text()).slice(0, 800000), seen = new Set();
+for (const m of html.matchAll(/<a[^>]+href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]{3,400}?)<\/a>/gi)) {
+const t = m[2].replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+const lv = /flood warning/i.test(t) ? 3 : /flood watch/i.test(t) ? 2 : /high streamflow/i.test(t) ? 1 : 0;
+if (!lv || seen.has(t)) continue; seen.add(t);
+let u = ''; try { const x = new URL(m[1], 'https://bcrfc.env.gov.bc.ca/warnings/'); if (x.hostname === 'bcrfc.env.gov.bc.ca') u = x.toString(); } catch (e) {}
+out.items.push({ level: lv, title: t.slice(0, 300), url: u });
+if (out.items.length >= 40) break; } }
+} catch (e) {}
+body = JSON.stringify(out);
+ctx.waitUntil(caches.default.put(key, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=900' } })));
+}
+return new Response(body, { status: 200, headers: { ...cors(allowOrigin), 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+}
 if (q.has('phone')) {
 if (tooMany(ip, phoneHits, PHONE_PER_MIN)) return reply('Slow down', 429, allowOrigin, { 'Retry-After': '30' });
 const site = publicUrl(q.get('phone') || '');
