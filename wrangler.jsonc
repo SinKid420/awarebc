@@ -6,5 +6,7 @@
   "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "Hub" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
   // moderators: rider IDs (from Friends > Safety & account), comma separated
-  "vars": { "ADMINS": "1a10d447739b8c4b461f298f" }
+  "vars": { "ADMINS": "1a10d447739b8c4b461f298f",
+    // Google sign-in: the OAuth Web client ID from Google Cloud (public, not a secret). Empty = sign-in off
+    "GCLIENT": "" }
 }

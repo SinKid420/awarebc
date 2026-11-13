@@ -67,6 +67,43 @@ async function putIdx(env, a) { const old = Date.now() - WEEK, gone = a.filter(r
   await env.REPORTS.put('idx', JSON.stringify(a.slice(-MAX))); try { await caches.default.delete(new Request('https://cache.local/idx')); } catch (e) {} }
 async function body(req, max) { const t = await req.text(); if (t.length > max) throw new Error('too big'); return JSON.parse(t); }
 
+// ---------- Google sign-in (optional): an account only lets a rider get their friends, chat and reports back on a new phone ----------
+// The app sends Google's sign-in token; it is checked here against Google's public keys. Only a fingerprint of the Google account id is kept,
+// never the email or name. The rider key is kept encrypted, and only handed back to the same Google account.
+let GKEYS = null, GKT = 0;
+function b64u(s) { s = String(s).replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+async function gkeys(force) {
+  if (GKEYS && !force && Date.now() - GKT < 3600000) return GKEYS;
+  const r = await fetch('https://www.googleapis.com/oauth2/v3/certs', { cf: { cacheTtl: 3600 } }); const j = await r.json(), k = {};
+  for (const x of j.keys || []) if (x.kty === 'RSA' && x.kid) k[x.kid] = await crypto.subtle.importKey('jwk', { kty: 'RSA', n: x.n, e: x.e, alg: 'RS256', ext: true }, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+  GKEYS = k; GKT = Date.now(); return k;
+}
+export async function gverify(tok, aud, keys) {
+  try {
+    const p = String(tok || '').split('.'); if (p.length !== 3 || tok.length > 4096) return null;
+    const dec = x => JSON.parse(new TextDecoder().decode(b64u(x))), h = dec(p[0]), c = dec(p[1]);
+    if (h.alg !== 'RS256') return null; let K = keys[h.kid]; if (!K && !keys._t) { keys = await gkeys(true); K = keys[h.kid]; } if (!K) return null;
+    if (!await crypto.subtle.verify('RSASSA-PKCS1-v1_5', K, b64u(p[2]), new TextEncoder().encode(p[0] + '.' + p[1]))) return null;
+    const now = Date.now() / 1000;
+    if (c.iss !== 'accounts.google.com' && c.iss !== 'https://accounts.google.com') return null;
+    if (!aud || c.aud !== aud || !(c.exp > now - 60) || c.iat > now + 300 || !c.sub) return null;
+    return c;
+  } catch (e) { return null; }
+}
+const KEYRX = /^[A-Za-z0-9_-]{16,64}$/;
+async function auth(req, env, ip, p) {
+  if (req.method !== 'POST') return err('POST only', 405);
+  if (!env.GCLIENT) return err('Google sign-in is not set up yet', 503);
+  if (await lim(env, ip, 'g', 30)) return err('Too many sign-ins from here. Try again later.', 429);
+  const b = await body(req, 6000), hub = q => env.HUB.get(env.HUB.idFromName('hub')).fetch(new Request('https://hub/_acct', { method: 'POST', body: JSON.stringify(q) })).then(r => r.json());
+  if (p === '/auth/redeem') { const c = clean(b.code, 40), k = clean(b.uid, 64); if (!c || !KEYRX.test(k)) return err('bad request'); const r = await hub({ op: 'redeem', code: c, key: k }); return r.error ? err(r.error, 400) : json(r); }
+  const c = await gverify(b.cred, env.GCLIENT, await gkeys()); if (!c) return err('Google sign-in could not be checked. Try again.', 401);
+  const gh = (await sha('awarebc-g:' + c.sub)).slice(0, 40), first = clean(c.given_name || c.name || '', 24);
+  if (p === '/auth/code') { const code = rid() + rid(); await hub({ op: 'code', code, gh }); return json({ code, first }); } // for the Android app: sign in happens in the phone's browser
+  if (p === '/auth/google') { const k = clean(b.uid, 64); if (!KEYRX.test(k)) return err('bad request'); const r = await hub({ op: 'link', gh, key: k }); return r.error ? err(r.error, 400) : json(Object.assign(r, { first })); }
+  return err('not found', 404);
+}
+
 export default {
   async fetch(req, env, ctx) {
     if (env.HUB) env = Object.assign({}, env, { REPORTS: store(env) });
@@ -153,6 +190,7 @@ export default {
         return json({ ok: true });
       }
       // friends, live spots and chat
+      if (p.startsWith('/auth/')) { if (!env.HUB) return err('friends server not set up yet', 503); return await auth(req, env, ip, p); }
       if (req.method === 'POST' && p.startsWith('/s/')) { if (!env.HUB) return err('friends server not set up yet', 503); return env.HUB.get(env.HUB.idFromName('hub')).fetch(req); }
       return err('not found', 404);
     } catch (e) { return err('bad request'); }
@@ -185,7 +223,11 @@ export class Hub {
       CREATE TABLE IF NOT EXISTS blocks (a TEXT, b TEXT, t INTEGER, PRIMARY KEY (a, b));
       CREATE INDEX IF NOT EXISTS blocks_b ON blocks(b);
       CREATE TABLE IF NOT EXISTS flags (u TEXT, by TEXT, ih TEXT, why TEXT, x TEXT, t INTEGER, PRIMARY KEY (u, by));
-      CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v BLOB, d INTEGER DEFAULT 0, t INTEGER);`);
+      CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v BLOB, d INTEGER DEFAULT 0, t INTEGER);
+      CREATE TABLE IF NOT EXISTS acct (gh TEXT PRIMARY KEY, u TEXT, enc BLOB, t INTEGER);
+      CREATE TABLE IF NOT EXISTS acode (c TEXT PRIMARY KEY, gh TEXT, t INTEGER);
+      CREATE TABLE IF NOT EXISTS backups (u TEXT PRIMARY KEY, v TEXT, t INTEGER);
+      CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v BLOB);`);
     for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
     try { state.storage.getAlarm().then(a => { if (!a) state.storage.setAlarm(Date.now() + DAY); }).catch(() => {}); } catch (e) {}
   }
@@ -202,7 +244,13 @@ export class Hub {
   shares(a, b) { return this.q('SELECT 1 FROM gm x JOIN gm y ON x.g=y.g WHERE x.u=? AND y.u=? LIMIT 1', a, b).length > 0; }
   known(a, b) { return this.q('SELECT 1 FROM friends WHERE (a=? AND b=?) OR (a=? AND b=?)', a, b, b, a).length > 0 || this.shares(a, b); }
   unfriend(a, b) { this.sql.exec('DELETE FROM friends WHERE (a=? AND b=?) OR (a=? AND b=?)', a, b, b, a); }
+  async aes() { // this server's own random key for the stored rider keys (made once, never leaves the server)
+    if (this._aes) return this._aes; let r = this.q("SELECT v FROM meta WHERE k='aes'")[0];
+    if (!r) { const v = crypto.getRandomValues(new Uint8Array(32)); this.sql.exec("INSERT OR IGNORE INTO meta (k, v) VALUES ('aes', ?)", v); r = this.q("SELECT v FROM meta WHERE k='aes'")[0]; }
+    return this._aes = await crypto.subtle.importKey('raw', new Uint8Array(r.v), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  }
   wipe(u) {
+    this.sql.exec('DELETE FROM acct WHERE u=?', u); this.sql.exec('DELETE FROM backups WHERE u=?', u);
     this.sql.exec('DELETE FROM friends WHERE a=? OR b=?', u, u); this.sql.exec('DELETE FROM reads WHERE u=?', u);
     this.sql.exec('DELETE FROM blocks WHERE a=?', u); this.sql.exec('DELETE FROM flags WHERE by=?', u);
     this.sql.exec("DELETE FROM msgs WHERE u=? OR chat LIKE ? OR chat LIKE ?", u, 'd:' + u + ':%', 'd:%:' + u);
@@ -228,6 +276,20 @@ export class Hub {
   }
   async fetch(req) {
     const iu = new URL(req.url);
+    if (iu.pathname === '/_acct') { // Google sign-in links, only reachable from the worker above
+      const q = JSON.parse(await req.text()), now = Date.now(), J = o => new Response(JSON.stringify(o));
+      this.sql.exec('DELETE FROM acode WHERE t<?', now - 180000);
+      let gh = q.gh;
+      if (q.op === 'code') { this.sql.exec('INSERT OR REPLACE INTO acode (c, gh, t) VALUES (?, ?, ?)', String(q.code), String(gh), now); return J({ ok: true }); }
+      if (q.op === 'redeem') { const r = this.q('SELECT gh FROM acode WHERE c=?', String(q.code))[0]; if (!r) return J({ error: 'Sign-in code expired. Try again.' }); this.sql.exec('DELETE FROM acode WHERE c=?', String(q.code)); gh = r.gh; }
+      if (q.op === 'link' || q.op === 'redeem') {
+        const ak = await this.aes(), row = this.q('SELECT enc FROM acct WHERE gh=?', gh)[0];
+        if (row) { const e = new Uint8Array(row.enc), key = new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: e.slice(0, 12) }, ak, e.slice(12))); this.sql.exec('UPDATE acct SET t=? WHERE gh=?', now, gh); return J({ key, existing: key !== q.key }); }
+        const iv = crypto.getRandomValues(new Uint8Array(12)), ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, ak, new TextEncoder().encode(q.key))), enc = new Uint8Array(12 + ct.length); enc.set(iv); enc.set(ct, 12);
+        const me = await rider({ uid: q.key }); this.sql.exec('INSERT INTO acct (gh, u, enc, t) VALUES (?, ?, ?, ?)', gh, me ? me.u : '', enc, now); return J({ key: q.key, existing: false });
+      }
+      return J({ error: 'bad op' });
+    }
     if (iu.pathname === '/_kv') { // trail reports storage, only reachable from the worker above
       const op = iu.searchParams.get('op'), k = String(iu.searchParams.get('k') || '').slice(0, 200), now = Date.now();
       if (op === 'get') { const r = this.q('SELECT v, d FROM kv WHERE k=?', k)[0]; if (!r) return new Response(null, { status: 404 }); if (r.d) return new Response(null, { status: 410 }); return new Response(r.v); }
@@ -241,7 +303,7 @@ export class Hub {
       return new Response(JSON.stringify({ x }));
     }
     const p = new URL(req.url).pathname.slice(3), now = Date.now(), ip = req.headers.get('CF-Connecting-IP') || 'x';
-    let b; try { b = await body(req, 8000); } catch (e) { return err('bad request'); }
+    let b; try { b = await body(req, p === 'backup' ? 70000 : 8000); } catch (e) { return err('bad request'); }
     const me = await rider(b); if (!me) return err('rider key missing');
     const U = me.u, ih = (await sha('awarebc-ip:' + ip)).slice(0, 16), isAdmin = this.admin(U);
     let name = clean(b.name, 24) || 'Rider'; if (RESERVED.test(name) && !isAdmin) name = 'Rider';
@@ -366,6 +428,9 @@ export class Hub {
       this.sql.exec('DELETE FROM gm WHERE g=? AND u=?', g, o); return json({ ok: true });
     }
     if (p === 'gleave') { const g = gid(); if (g) this.leave(g, U); return json({ ok: true }); }
+    if (p === 'backup') { // settings backup for signed-in riders (home pin, map choices), max 60 KB
+      if (b.op === 'put') { const v = String(b.v || ''); if (v.length > 60000) return err('backup too big'); try { JSON.parse(v); } catch (e) { return err('bad backup'); } this.sql.exec('INSERT OR REPLACE INTO backups (u, v, t) VALUES (?, ?, ?)', U, v, now); return json({ ok: true, t: now }); }
+      const r = this.q('SELECT v, t FROM backups WHERE u=?', U)[0]; return json(r ? { v: r.v, t: r.t } : { v: null }); }
     if (p === 'wipe') { this.wipe(U); return json({ ok: true }); } // delete everything about this rider from the friends server
     if (p === 'mod') { // moderators only (their rider IDs are listed in ADMINS)
       if (!isAdmin) return err('not found', 404);
