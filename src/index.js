@@ -96,10 +96,10 @@ async function auth(req, env, ip, p) {
   if (!env.GCLIENT) return err('Google sign-in is not set up yet', 503);
   if (await lim(env, ip, 'g', 30)) return err('Too many sign-ins from here. Try again later.', 429);
   const b = await body(req, 6000), hub = q => env.HUB.get(env.HUB.idFromName('hub')).fetch(new Request('https://hub/_acct', { method: 'POST', body: JSON.stringify(q) })).then(r => r.json());
-  if (p === '/auth/redeem') { const c = clean(b.code, 40), k = clean(b.uid, 64); if (!c || !KEYRX.test(k)) return err('bad request'); const r = await hub({ op: 'redeem', code: c, key: k }); return r.error ? err(r.error, 400) : json(r); }
+  if (p === '/auth/redeem') { const c = clean(b.code, 40), k = clean(b.uid, 64), n = clean(b.n, 64); if (!c || !KEYRX.test(k) || n.length < 32) return err('bad request'); const r = await hub({ op: 'redeem', code: c, key: k, st: await sha('awarebc-st:' + n) }); return r.error ? err(r.error, 400) : json(r); }
   const c = await gverify(b.cred, env.GCLIENT, await gkeys()); if (!c) return err('Google sign-in could not be checked. Try again.', 401);
   const gh = (await sha('awarebc-g:' + c.sub)).slice(0, 40), first = clean(c.given_name || c.name || '', 24);
-  if (p === '/auth/code') { const code = rid() + rid(); await hub({ op: 'code', code, gh }); return json({ code, first }); } // for the Android app: sign in happens in the phone's browser
+  if (p === '/auth/code') { const st = clean(b.st, 64); if (!/^[a-f0-9]{64}$/.test(st)) return err('bad request'); const code = rid() + rid(); await hub({ op: 'code', code, gh, st }); return json({ code, first }); } // for the Android app: sign in happens in the phone's browser
   if (p === '/auth/google') { const k = clean(b.uid, 64); if (!KEYRX.test(k)) return err('bad request'); const r = await hub({ op: 'link', gh, key: k }); return r.error ? err(r.error, 400) : json(Object.assign(r, { first })); }
   return err('not found', 404);
 }
@@ -225,7 +225,7 @@ export class Hub {
       CREATE TABLE IF NOT EXISTS flags (u TEXT, by TEXT, ih TEXT, why TEXT, x TEXT, t INTEGER, PRIMARY KEY (u, by));
       CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v BLOB, d INTEGER DEFAULT 0, t INTEGER);
       CREATE TABLE IF NOT EXISTS acct (gh TEXT PRIMARY KEY, u TEXT, enc BLOB, t INTEGER);
-      CREATE TABLE IF NOT EXISTS acode (c TEXT PRIMARY KEY, gh TEXT, t INTEGER);
+      CREATE TABLE IF NOT EXISTS acode2 (c TEXT PRIMARY KEY, gh TEXT, st TEXT, t INTEGER);
       CREATE TABLE IF NOT EXISTS backups (u TEXT PRIMARY KEY, v TEXT, t INTEGER);
       CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v BLOB);`);
     for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
@@ -278,10 +278,11 @@ export class Hub {
     const iu = new URL(req.url);
     if (iu.pathname === '/_acct') { // Google sign-in links, only reachable from the worker above
       const q = JSON.parse(await req.text()), now = Date.now(), J = o => new Response(JSON.stringify(o));
-      this.sql.exec('DELETE FROM acode WHERE t<?', now - 180000);
+      this.sql.exec('DELETE FROM acode2 WHERE t<?', now - 180000);
       let gh = q.gh;
-      if (q.op === 'code') { this.sql.exec('INSERT OR REPLACE INTO acode (c, gh, t) VALUES (?, ?, ?)', String(q.code), String(gh), now); return J({ ok: true }); }
-      if (q.op === 'redeem') { const r = this.q('SELECT gh FROM acode WHERE c=?', String(q.code))[0]; if (!r) return J({ error: 'Sign-in code expired. Try again.' }); this.sql.exec('DELETE FROM acode WHERE c=?', String(q.code)); gh = r.gh; }
+      if (q.op === 'code') { this.sql.exec('INSERT OR REPLACE INTO acode2 (c, gh, st, t) VALUES (?, ?, ?, ?)', String(q.code), String(gh), String(q.st), now); return J({ ok: true }); }
+      if (q.op === 'redeem') { const r = this.q('SELECT gh, st FROM acode2 WHERE c=?', String(q.code))[0]; if (!r) return J({ error: 'Sign-in code expired. Try again.' }); this.sql.exec('DELETE FROM acode2 WHERE c=?', String(q.code));
+        if (!q.st || r.st !== q.st) return J({ error: 'This sign-in was not started on this phone.' }); gh = r.gh; } // the code only works on the phone that started the sign-in
       if (q.op === 'link' || q.op === 'redeem') {
         const ak = await this.aes(), row = this.q('SELECT enc FROM acct WHERE gh=?', gh)[0];
         if (row) { const e = new Uint8Array(row.enc), key = new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: e.slice(0, 12) }, ak, e.slice(12))); this.sql.exec('UPDATE acct SET t=? WHERE gh=?', now, gh); return J({ key, existing: key !== q.key }); }
