@@ -160,6 +160,13 @@ if (request.method !== 'GET') return reply('GET only', 405, allowOrigin);
 if (!okOrigin) return reply('Not allowed', 403, allowOrigin);
 const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
 const q = new URL(request.url).searchParams;
+if (q.has('overture')) { // newest Overture Maps release that has map tiles (places with phone numbers, closed-business status)
+const key = new Request('https://overture.cache/latest'); let hit = await caches.default.match(key), body;
+if (hit) body = await hit.text(); else { let rel = '';
+try { const r = await fetch('https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/?list-type=2&prefix=tiles/&delimiter=/');
+if (r.ok) { const x = await r.text(), L = [...x.matchAll(/<Prefix>tiles\/(\d{4}-\d{2}-\d{2}\.\d+)\/<\/Prefix>/g)].map(m => m[1]).sort(); rel = L[L.length - 1] || ''; } } catch (e) {}
+body = JSON.stringify({ release: rel }); ctx.waitUntil(caches.default.put(key, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=' + (rel ? 43200 : 600) } }))); }
+return new Response(body, { status: 200, headers: { ...cors(allowOrigin), 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } }); }
 if (q.has('flood')) { // BC River Forecast Centre: flood warnings, watches and high streamflow advisories in effect
 if (tooMany(ip, phoneHits, PHONE_PER_MIN)) return reply('Slow down', 429, allowOrigin, { 'Retry-After': '30' });
 const key = new Request('https://flood.cache/bc');
