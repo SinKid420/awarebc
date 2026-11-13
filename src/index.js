@@ -116,6 +116,12 @@ export default {
     const url = new URL(req.url), p = url.pathname, ip = req.headers.get('CF-Connecting-IP') || 'x';
     try {
       // list reports in a map box (cached 20 s at the edge)
+      if (req.method === 'GET' && p === '/places') { // AwareBC's own places list (businesses people added), read by anyone using the app
+        const s = num(url.searchParams.get('s'), -90, 90), n = num(url.searchParams.get('n'), -90, 90), w = num(url.searchParams.get('w'), -180, 180), e = num(url.searchParams.get('e'), -180, 180);
+        if (s == null || n == null || w == null || e == null || n - s > 2 || e - w > 3) return err('bad box');
+        const r = await env.HUB.get(env.HUB.idFromName('hub')).fetch(new Request('https://hub/_places', { method: 'POST', body: JSON.stringify({ s, n, w, e }) }));
+        return json(await r.json(), 200, 'public, max-age=30');
+      }
       if (req.method === 'GET' && p === '/list') {
         const s = num(url.searchParams.get('s'), -90, 90), n = num(url.searchParams.get('n'), -90, 90), w = num(url.searchParams.get('w'), -180, 180), e = num(url.searchParams.get('e'), -180, 180);
         if (s == null || n == null || w == null || e == null) return err('bad box');
@@ -227,7 +233,10 @@ export class Hub {
       CREATE TABLE IF NOT EXISTS acct (gh TEXT PRIMARY KEY, u TEXT, enc BLOB, t INTEGER);
       CREATE TABLE IF NOT EXISTS acode2 (c TEXT PRIMARY KEY, gh TEXT, st TEXT, t INTEGER);
       CREATE TABLE IF NOT EXISTS backups (u TEXT PRIMARY KEY, v TEXT, t INTEGER);
-      CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v BLOB);`);
+      CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v BLOB);
+      CREATE TABLE IF NOT EXISTS places (id TEXT PRIMARY KEY, lat REAL, lon REAL, n TEXT, ty TEXT, ad TEXT, ph TEXT, hr TEXT, ws TEXT, u TEXT, by TEXT, t INTEGER, up INTEGER, hid INTEGER DEFAULT 0);
+      CREATE INDEX IF NOT EXISTS places_ll ON places(lat, lon);
+      CREATE TABLE IF NOT EXISTS pflags (id TEXT, by TEXT, t INTEGER, PRIMARY KEY (id, by));`);
     for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
     try { state.storage.getAlarm().then(a => { if (!a) state.storage.setAlarm(Date.now() + DAY); }).catch(() => {}); } catch (e) {}
   }
@@ -276,6 +285,8 @@ export class Hub {
   }
   async fetch(req) {
     const iu = new URL(req.url);
+    if (iu.pathname === '/_places') { const q = JSON.parse(await req.text());
+      return new Response(JSON.stringify({ p: this.q('SELECT id, lat, lon, n, ty, ad, ph, hr, ws, by, t, up FROM places WHERE hid=0 AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? LIMIT 800', q.s, q.n, q.w, q.e) })); }
     if (iu.pathname === '/_acct') { // Google sign-in links, only reachable from the worker above
       const q = JSON.parse(await req.text()), now = Date.now(), J = o => new Response(JSON.stringify(o));
       this.sql.exec('DELETE FROM acode2 WHERE t<?', now - 180000);
@@ -429,6 +440,20 @@ export class Hub {
       this.sql.exec('DELETE FROM gm WHERE g=? AND u=?', g, o); return json({ ok: true });
     }
     if (p === 'gleave') { const g = gid(); if (g) this.leave(g, U); return json({ ok: true }); }
+    if (p === 'place') { // add or fix a place (name and spot needed; phone and address are what matter most)
+      const PT = /^[+(\d][\d\s().\-]{5,24}$/, ws = clean(b.ws, 200), ph = clean(b.ph, 30), op = String(b.op || '');
+      if (op === 'flag') { const id = clean(b.id, 20), r = this.q('SELECT u FROM places WHERE id=?', id)[0]; if (!r) return err('not found', 404); this.sql.exec('INSERT OR IGNORE INTO pflags (id, by, t) VALUES (?, ?, ?)', id, U, now);
+        const nf = this.q('SELECT COUNT(*) AS c FROM pflags WHERE id=?', id)[0].c; if (nf >= 3) this.sql.exec('UPDATE places SET hid=1 WHERE id=?', id); return json({ ok: true }); }
+      if (op === 'del') { const id = clean(b.id, 20), r = this.q('SELECT u FROM places WHERE id=?', id)[0]; if (!r) return err('not found', 404); if (r.u !== U && !isAdmin) return err('Only the person who added it can remove it.', 403); this.sql.exec('DELETE FROM places WHERE id=?', id); return json({ ok: true }); }
+      const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180), nm = clean(b.n, 80); if (lat == null || lon == null || nm.length < 2) return err('A name and a spot are needed.');
+      if (ph && !PT.test(ph)) return err('That phone number doesn\'t look right.'); if (ws && !/^https?:\/\/[^\s"<>]{3,200}$/i.test(ws)) return err('Website must start with https://');
+      const by = isAdmin ? 'Josh Singer' : name, f = [nm, clean(b.ty, 40), clean(b.ad, 120), ph, clean(b.hr, 120), ws];
+      if (op === 'edit') { const id = clean(b.id, 20), r = this.q('SELECT u FROM places WHERE id=?', id)[0]; if (!r) return err('not found', 404); if (r.u !== U && !isAdmin) return err('Only the person who added it can change it.', 403);
+        this.sql.exec('UPDATE places SET lat=?, lon=?, n=?, ty=?, ad=?, ph=?, hr=?, ws=?, up=? WHERE id=?', +lat.toFixed(6), +lon.toFixed(6), ...f, now, id); return json({ ok: true, id }); }
+      if (this.lim('pl' + U, isAdmin ? 500 : 20, DAY) || this.lim('pli' + ih, 40, DAY)) return err('That\'s a lot of new places today. Try again tomorrow.', 429);
+      const id = rid(); this.sql.exec('INSERT INTO places (id, lat, lon, n, ty, ad, ph, hr, ws, u, by, t, up) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', id, +lat.toFixed(6), +lon.toFixed(6), ...f, U, by, now, now);
+      return json({ ok: true, id, by }); }
+    if (p === 'myplaces') return json({ ids: this.q('SELECT id FROM places WHERE u=?', U).map(r => r.id), admin: isAdmin });
     if (p === 'backup') { // settings backup for signed-in riders (home pin, map choices), max 60 KB
       if (b.op === 'put') { const v = String(b.v || ''); if (v.length > 60000) return err('backup too big'); try { JSON.parse(v); } catch (e) { return err('bad backup'); } this.sql.exec('INSERT OR REPLACE INTO backups (u, v, t) VALUES (?, ?, ?)', U, v, now); return json({ ok: true, t: now }); }
       const r = this.q('SELECT v, t FROM backups WHERE u=?', U)[0]; return json(r ? { v: r.v, t: r.t } : { v: null }); }
