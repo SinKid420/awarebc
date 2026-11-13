@@ -80,7 +80,10 @@ return [...score.entries()].sort((a, b) => b[1] - a[1]).filter(e => e[1] >= 2).s
 async function phoneLookup(site) {
 const u = publicUrl(site); if (!u) return { phones: [] };
 const p = await getPage(u); if (!p) return { phones: [] };
-let phones = findPhones(p.html);
+let phones = findPhones(p.html), image = '';
+// the place's own photo for its link previews (og:image), https only
+const mi = /<meta[^>]+(?:property|name)\s*=\s*["'](?:og:image(?::secure_url)?|twitter:image)["'][^>]*>/i.exec(p.html);
+if (mi) { const c = /content\s*=\s*["']([^"']{8,500})["']/i.exec(mi[0]); if (c) { try { const iu = publicUrl(new URL(c[1].replace(/&amp;/g, '&'), p.url).toString()); if (iu && iu.protocol === 'https:' && !/\.svg(\?|$)/i.test(iu.pathname)) image = iu.toString(); } catch (e) {} } }
 if (!phones.length) {
 const base = p.url.hostname.replace(/^www\./, '');
 for (const m of p.html.matchAll(/href\s*=\s*["']([^"'#]{1,300})["'][^>]*>([^<]{0,60})/gi)) {
@@ -91,7 +94,7 @@ const q = await getPage(c); if (q) phones = findPhones(q.html);
 break;
 }
 }
-return { phones };
+return { phones, image };
 }
 function route(t) {
 if (t.protocol !== 'https:' || t.port || t.username || t.password || t.hash) return null;
@@ -184,7 +187,7 @@ if (q.has('phone')) {
 if (tooMany(ip, phoneHits, PHONE_PER_MIN)) return reply('Slow down', 429, allowOrigin, { 'Retry-After': '30' });
 const site = publicUrl(q.get('phone') || '');
 if (!site) return reply('That request is not allowed', 403, allowOrigin);
-const key = new Request('https://phone.cache/' + encodeURIComponent(site.toString()));
+const key = new Request('https://phone2.cache/' + encodeURIComponent(site.toString()));
 let hit = await caches.default.match(key), body;
 if (hit) body = await hit.text();
 else {
