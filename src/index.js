@@ -248,6 +248,7 @@ export class Hub {
       CREATE TABLE IF NOT EXISTS rlg (k TEXT, u TEXT, by TEXT, tg TEXT, rig TEXT, lat REAL, lon REAL, at INTEGER, PRIMARY KEY (k, u));
       CREATE TABLE IF NOT EXISTS rlm (id TEXT PRIMARY KEY, ty TEXT, v BLOB, t INTEGER);
       CREATE TABLE IF NOT EXISTS rlb (u TEXT, b TEXT, n INTEGER, PRIMARY KEY (u, b));
+      CREATE TABLE IF NOT EXISTS rln (u TEXT PRIMARY KEY, by TEXT, tg TEXT, rig TEXT, lat REAL, lon REAL, at INTEGER);
       CREATE TABLE IF NOT EXISTS rlba (ref TEXT PRIMARY KEY, u TEXT, b TEXT, by TEXT, t INTEGER);`);
     for (const c of ['mid TEXT', 'rb TEXT', 'cb TEXT', 'cbn TEXT', 'cfm INTEGER DEFAULT 0']) try { this.sql.exec('ALTER TABLE rlp ADD COLUMN ' + c); } catch (e) {}
     for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
@@ -294,7 +295,7 @@ export class Hub {
     try {
       this.sql.exec('DELETE FROM msgs WHERE t<?', now - MSG_DAYS * DAY);
       { const old = this.q('SELECT id FROM rlp WHERE t<? LIMIT 2000', now - RL_DAYS * DAY).map(r => r.id); old.forEach(id => this.rlDel(id)); }
-      this.sql.exec('DELETE FROM rlg WHERE at<?', now - DAY);
+      this.sql.exec('DELETE FROM rlg WHERE at<?', now - DAY); this.sql.exec('DELETE FROM rln WHERE at<?', now - HOUR);
       this.sql.exec('DELETE FROM flags WHERE t<?', now - FLAG_DAYS * DAY);
       this.sql.exec('UPDATE riders SET share=0, lat=NULL, lon=NULL WHERE share=1 AND ((until>0 AND until<?) OR at<?)', now, now - SPOT_AGE);
       this.sql.exec('UPDATE riders SET mute=0 WHERE mute>0 AND mute<?', now);
@@ -495,6 +496,14 @@ export class Hub {
         for (let i = 0; i < 20; i++) { const a = crypto.getRandomValues(new Uint8Array(6)), txt = String(100 + a[0] * 4 % 900).padStart(3, '0') + L3[a[1] % 24] + L3[a[2] % 24] + L3[a[3] % 24], k = await keyOf(txt);
           if (!this.q('SELECT 1 FROM rlk WHERE k=?', k.h).length) { this.sql.exec('INSERT INTO rlk (k, u, t) VALUES (?, ?, ?)', k.h, U, now); return json({ key: k.txt }); } } return err('Try again'); }
       if (op === 'join') return json({ ok: true, key: key ? key.txt : '' });
+      if (op === 'near') { // Nearby riders (Off-road, opt-in): see and be seen, rough spot only (about 1 km)
+        const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (lat == null || lon == null) return err('No spot');
+        if (!b.share) { this.sql.exec('DELETE FROM rln WHERE u=?', U); return json({ r: [] }); }
+        if (this.lim('nr' + U, 120, HOUR)) return err('Slow down', 429);
+        this.sql.exec('INSERT OR REPLACE INTO rln (u, by, tg, rig, lat, lon, at) VALUES (?, ?, ?, ?, ?, ?, ?)', U, isAdmin ? 'Josh Singer' : name, me.t, clean(b.rig, 40), Math.round(lat * 100) / 100, Math.round(lon * 100) / 100, now);
+        const r = this.q('SELECT u, by, tg, rig, lat, lon, at FROM rln WHERE u<>? AND at>? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? ORDER BY at DESC LIMIT 60', U, now - 15 * 60000, lat - 0.6, lat + 0.6, lon - 0.9, lon + 0.9);
+        const bl = new Set(this.q('SELECT b FROM blocks WHERE a=?', U).map(x => x.b).concat(this.q('SELECT a FROM blocks WHERE b=?', U).map(x => x.a)));
+        return json({ r: r.filter(x => !bl.has(x.u)).map(x => ({ by: x.by, tg: x.tg, rig: x.rig, lat: x.lat, lon: x.lon, at: x.at, fd: !!this.admin(x.u) })) }); }
       if (op === 'prof') { const tg = clean(b.tg, 6).toUpperCase(); const rr = !tg || tg === me.t ? { u: U, n: name, t: me.t } : this.q('SELECT u, n, t FROM riders WHERE t=?', tg)[0]; if (!rr) return err('Rider not found', 404);
         const lastRig = this.q("SELECT rig, tags FROM rlp WHERE u=? AND kind='r' AND hid=0 AND k='' ORDER BY t DESC LIMIT 1", rr.u)[0];
         return json({ n: this.admin(rr.u) ? 'Josh Singer' : rr.u === U ? name : rr.n, t: rr.t, me: rr.u === U, fd: !!this.admin(rr.u), bd: badges(rr.u), posts: this.q('SELECT count(*) AS c FROM rlp WHERE u=? AND hid=0', rr.u)[0].c, rig: lastRig ? lastRig.rig : '', tags: lastRig ? JSON.parse(lastRig.tags || '[]') : [] }); }
