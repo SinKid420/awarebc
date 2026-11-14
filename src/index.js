@@ -503,6 +503,11 @@ export class Hub {
         for (let i = 0; i < 20; i++) { const a = crypto.getRandomValues(new Uint8Array(6)), txt = String(100 + a[0] * 4 % 900).padStart(3, '0') + L3[a[1] % 24] + L3[a[2] % 24] + L3[a[3] % 24], k = await keyOf(txt);
           if (!this.q('SELECT 1 FROM rlk WHERE k=?', k.h).length) { this.sql.exec('INSERT INTO rlk (k, u, t) VALUES (?, ?, ?)', k.h, U, now); return json({ key: k.txt }); } } return err('Try again'); }
       if (op === 'join') return json({ ok: true, key: key ? key.txt : '' });
+      if (op === 'crigs') { // convoy rigs for the main map (Off-road), and my own spot if I share it with the convoy
+        if (!key) return err('No convoy'); const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (lat == null || lon == null) return err('No spot');
+        if (b.share) this.sql.exec('INSERT OR REPLACE INTO rlg (k, u, by, tg, rig, lat, lon, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', kh, U, isAdmin ? 'Josh Singer' : name, me.t, clean(b.rig, 40), +lat.toFixed(5), +lon.toFixed(5), now);
+        const r = this.q('SELECT u, by, tg, rig, lat, lon, at FROM rlg WHERE k=? AND u<>? AND at>? LIMIT 60', kh, U, now - 30 * 60000);
+        return json({ r: r.map(x => ({ by: x.by, tg: x.tg, rig: x.rig, lat: x.lat, lon: x.lon, at: x.at, fd: !!this.admin(x.u) })) }); }
       if (op === 'near') { // Nearby riders (Off-road, opt-in): see and be seen, rough spot only (about 1 km)
         const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (lat == null || lon == null) return err('No spot');
         if (!b.share) { this.sql.exec('DELETE FROM rln WHERE u=?', U); return json({ r: [] }); }
