@@ -246,7 +246,10 @@ export class Hub {
       CREATE TABLE IF NOT EXISTS rlc (cid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, u TEXT, by TEXT, tg TEXT, x TEXT, q INTEGER, ans INTEGER DEFAULT 0, re INTEGER, t INTEGER);
       CREATE TABLE IF NOT EXISTS rlk (k TEXT PRIMARY KEY, u TEXT, t INTEGER);
       CREATE TABLE IF NOT EXISTS rlg (k TEXT, u TEXT, by TEXT, tg TEXT, rig TEXT, lat REAL, lon REAL, at INTEGER, PRIMARY KEY (k, u));
-      CREATE TABLE IF NOT EXISTS rlm (id TEXT PRIMARY KEY, ty TEXT, v BLOB, t INTEGER);`);
+      CREATE TABLE IF NOT EXISTS rlm (id TEXT PRIMARY KEY, ty TEXT, v BLOB, t INTEGER);
+      CREATE TABLE IF NOT EXISTS rlb (u TEXT, b TEXT, n INTEGER, PRIMARY KEY (u, b));
+      CREATE TABLE IF NOT EXISTS rlba (ref TEXT PRIMARY KEY, u TEXT, b TEXT, by TEXT, t INTEGER);`);
+    for (const c of ['mid TEXT', 'rb TEXT', 'cb TEXT', 'cbn TEXT', 'cfm INTEGER DEFAULT 0']) try { this.sql.exec('ALTER TABLE rlp ADD COLUMN ' + c); } catch (e) {}
     for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
     try { state.storage.getAlarm().then(a => { if (!a) state.storage.setAlarm(Date.now() + DAY); }).catch(() => {}); } catch (e) {}
   }
@@ -481,11 +484,29 @@ export class Hub {
       const out = r => { const mine = this.q('SELECT kind FROM rlr WHERE id=? AND u=?', r.id, U).map(x => x.kind);
         const cm = this.q('SELECT cid, by, tg, x, q, ans, t FROM rlc WHERE id=? ORDER BY (q=1 AND ans=0) DESC, cid DESC LIMIT 2', r.id);
         return { id: r.id, t: r.t, by: r.by, tg: r.tg, kind: r.kind, lat: r.lat, lon: r.lon, x: r.x, el: r.el, tc: r.tc, st: r.st, rig: r.rig, tags: JSON.parse(r.tags || '[]'), parts: r.parts || '', radio: r.radio || '',
-          img: r.img || '', au: r.au || '', aud: r.aud || 0, likes: r.likes, ver: r.ver, nc: r.nc, me: r.u === U, liked: mine.includes('l'), verd: mine.includes('v'), cm }; };
+          img: r.img || '', au: r.au || '', aud: r.aud || 0, likes: r.likes, ver: r.ver, nc: r.nc, me: r.u === U, liked: mine.includes('l'), verd: mine.includes('v'), cm,
+          rb: r.rb || '', cb: r.cbn || '', cbme: !!r.cb && r.cb === U, cfm: r.cfm || 0, cfmd: mine.includes('k'), bd: badges(r.u) }; };
+      // ---- badges: Recovery, Sawyer, Scout, Wrench, Relay (Bronze 3 · Silver 10 · Gold 25) ----
+      const BDG = ['recovery', 'sawyer', 'scout', 'wrench', 'relay'], bcache = {};
+      const badges = u => { if (!u) return {}; if (bcache[u]) return bcache[u]; const o = {}; this.q('SELECT b, n FROM rlb WHERE u=?', u).forEach(x => { o[x.b] = x.n; }); return bcache[u] = o; };
+      const award = (u, bd, ref, by) => { if (!u || !BDG.includes(bd) || this.q('SELECT 1 FROM rlba WHERE ref=?', ref).length) return false; this.sql.exec('INSERT INTO rlba (ref, u, b, by, t) VALUES (?, ?, ?, ?, ?)', ref, u, bd, by || '', now);
+        this.sql.exec('INSERT INTO rlb (u, b, n) VALUES (?, ?, 1) ON CONFLICT(u, b) DO UPDATE SET n=n+1', u, bd); delete bcache[u]; return true; };
       if (op === 'mkkey') { if (this.lim('mk' + U, 10, DAY)) return err('That\'s a lot of keys today.', 429); const L3 = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
         for (let i = 0; i < 20; i++) { const a = crypto.getRandomValues(new Uint8Array(6)), txt = String(100 + a[0] * 4 % 900).padStart(3, '0') + L3[a[1] % 24] + L3[a[2] % 24] + L3[a[3] % 24], k = await keyOf(txt);
           if (!this.q('SELECT 1 FROM rlk WHERE k=?', k.h).length) { this.sql.exec('INSERT INTO rlk (k, u, t) VALUES (?, ?, ?)', k.h, U, now); return json({ key: k.txt }); } } return err('Try again'); }
       if (op === 'join') return json({ ok: true, key: key ? key.txt : '' });
+      if (op === 'prof') { const tg = clean(b.tg, 6).toUpperCase(); const rr = !tg || tg === me.t ? { u: U, n: name, t: me.t } : this.q('SELECT u, n, t FROM riders WHERE t=?', tg)[0]; if (!rr) return err('Rider not found', 404);
+        const lastRig = this.q("SELECT rig, tags FROM rlp WHERE u=? AND kind='r' AND hid=0 AND k='' ORDER BY t DESC LIMIT 1", rr.u)[0];
+        return json({ n: rr.u === U ? name : rr.n, t: rr.t, me: rr.u === U, bd: badges(rr.u), posts: this.q('SELECT count(*) AS c FROM rlp WHERE u=? AND hid=0', rr.u)[0].c, rig: lastRig ? lastRig.rig : '', tags: lastRig ? JSON.parse(lastRig.tags || '[]') : [] }); }
+      if (op === 'relay') { // a post carried phone to phone through a dead zone, uploaded by the first phone with signal (public posts only)
+        if (key) return err('Convoy posts are not relayed'); const mid = clean(b.mid, 24), tg = clean(b.tg, 6).toUpperCase(), lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180), kind = ['c', 'h'].includes(b.kind) ? b.kind : null;
+        if (!/^[a-z0-9]{8,24}$/.test(mid) || !/^[A-Z0-9]{4}$/.test(tg) || lat == null || lon == null || !kind) return err('bad relay');
+        if (this.q('SELECT 1 FROM rlp WHERE mid=?', mid).length) return json({ ok: true, dup: true });
+        if (this.lim('ry' + U, 20, DAY) || this.lim('ryi' + ih, 40, DAY)) return err('Too many relays today.', 429);
+        const au = this.q('SELECT u, n FROM riders WHERE t=?', tg)[0], x = clean(b.x, 500), st = clean(b.st, 20); if (!x && !st) return err('empty');
+        const id = rid(); this.sql.exec('INSERT INTO rlp (id, t, u, by, tg, k, kind, lat, lon, x, el, tc, st, rig, tags, parts, radio, img, au, aud, mid, rb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          id, Math.min(now, num(b.t, now - 2 * DAY, now) || now), au ? au.u : '', au ? au.n : clean(b.by, 24) || 'Rider', tg, '', kind, +lat.toFixed(5), +lon.toFixed(5), x, num(b.el, -500, 9000) != null ? Math.round(b.el) : null, num(b.tc, -60, 60), st, '', '[]', '', '', '', '', 0, mid, name);
+        const got = au && au.u !== U ? award(U, 'relay', 'y:' + mid, au.u) : false; return json({ ok: true, relay: got }); }
       if (op === 'feed') { const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (lat == null || lon == null) return err('No spot');
         if (b.here) this.sql.exec('INSERT OR REPLACE INTO rlg (k, u, by, tg, rig, lat, lon, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', kh, U, name, me.t, clean(b.rig, 40), key && b.share ? +lat.toFixed(5) : +lat.toFixed(2), key && b.share ? +lon.toFixed(5) : +lon.toFixed(2), b.share || !key ? now : now);
         const box = [lat - 1.2, lat + 1.2, lon - 2, lon + 2], K = ['c', 'r', 'h'].includes(b.f) ? b.f : '';
@@ -494,6 +515,7 @@ export class Hub {
         return json({ p: ps.map(out), n: rigs.length, rigs: key ? rigs.filter(r => r.u !== U).map(r => ({ by: r.by, tg: r.tg, rig: r.rig, lat: r.lat, lon: r.lon, at: r.at })) : [], key: key ? key.txt : '' }); }
       if (op === 'post') { if (muted) return paused(); if (this.lim('rp' + U, isAdmin ? 300 : 25, DAY) || this.lim('rpi' + ih, 60, DAY)) return err('That\'s a lot of posts today. Try again tomorrow.', 429);
         const kind = ['c', 'r', 'h'].includes(b.kind) ? b.kind : null, lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (!kind || lat == null || lon == null) return err('Missing spot');
+        const mid = /^[a-z0-9]{8,24}$/.test(String(b.mid || '')) ? String(b.mid) : null; if (mid) { const d = this.q('SELECT id FROM rlp WHERE mid=?', mid)[0]; if (d) { this.sql.exec('UPDATE rlp SET u=? WHERE id=? AND (u IS NULL OR u=\'\')', U, d.id); return json({ ok: true, dup: true }); } }
         const x = clean(b.x, 500), hide = !!b.hide, id = rid(); let img = '', au = '';
         if (b.img) { const m = media(b.img, 320000, JP); if (!m || m.v[0] !== 0xff || m.v[1] !== 0xd8) return err('Photo not accepted'); img = rid() + rid(); this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', img, m.ty, m.v, now);
           const th = b.th ? media(b.th, 40000, JP) : null; if (th) this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', img + 't', th.ty, th.v, now); }
@@ -503,14 +525,28 @@ export class Hub {
         this.sql.exec('INSERT INTO rlp (id, t, u, by, tg, k, kind, lat, lon, x, el, tc, st, rig, tags, parts, radio, img, au, aud) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           id, now, U, isAdmin ? 'Josh Singer' : name, me.t, kh, kind, hide ? +lat.toFixed(2) : +lat.toFixed(5), hide ? +lon.toFixed(2) : +lon.toFixed(5), x, num(b.el, -500, 9000) != null ? Math.round(b.el) : null, num(b.tc, -60, 60),
           clean(b.st, 20), clean(b.rig, 40), JSON.stringify(tags), clean(b.parts, 1200), clean(b.radio, 40), img, au, num(b.aud, 0, 60) || 0);
+        if (mid) this.sql.exec('UPDATE rlp SET mid=? WHERE id=?', mid, id);
         return json({ ok: true, p: out(this.q('SELECT * FROM rlp WHERE id=?', id)[0]) }); }
       const r = post(b.id); if (!r) return err('Post not found', 404);
       if (op === 'like' || op === 'verify') { const kd = op === 'like' ? 'l' : 'v', col = op === 'like' ? 'likes' : 'ver', has = this.q('SELECT 1 FROM rlr WHERE id=? AND u=? AND kind=?', r.id, U, kd).length;
         if (has && kd === 'l') this.sql.exec('DELETE FROM rlr WHERE id=? AND u=? AND kind=?', r.id, U, kd); else if (!has) this.sql.exec('INSERT INTO rlr (id, u, kind) VALUES (?, ?, ?)', r.id, U, kd);
-        const c = this.q('SELECT count(*) AS c FROM rlr WHERE id=? AND kind=?', r.id, kd)[0].c; this.sql.exec('UPDATE rlp SET ' + col + '=? WHERE id=?', c, r.id); return json({ ok: true, c, on: !(has && kd === 'l') }); }
+        const c = this.q('SELECT count(*) AS c FROM rlr WHERE id=? AND kind=?', r.id, kd)[0].c; this.sql.exec('UPDATE rlp SET ' + col + '=? WHERE id=?', c, r.id);
+        if (kd === 'v' && r.kind === 'c' && r.u && r.u !== U) award(r.u, 'scout', 's:' + r.id, U);
+        return json({ ok: true, c, on: !(has && kd === 'l') }); }
+      if (op === 'clear') { // Sawyer: "I cleared it" on a tree-down or rock/hazard alert; another rider confirms
+        if (r.kind !== 'c' || !['tree', 'hazard'].includes(r.st)) return err('Only tree and hazard alerts can be cleared'); if (r.cb) return err('Already cleared by ' + r.cbn);
+        this.sql.exec('UPDATE rlp SET cb=?, cbn=? WHERE id=?', U, isAdmin ? 'Josh Singer' : name, r.id); return json({ ok: true }); }
+      if (op === 'cfm') { if (!r.cb) return err('Not cleared yet'); if (r.cb === U) return err('Someone else has to confirm it'); if (this.q("SELECT 1 FROM rlr WHERE id=? AND u=? AND kind='k'", r.id, U).length) return json({ ok: true });
+        this.sql.exec("INSERT INTO rlr (id, u, kind) VALUES (?, ?, 'k')", r.id, U); const c = this.q("SELECT count(*) AS c FROM rlr WHERE id=? AND kind='k'", r.id)[0].c; this.sql.exec('UPDATE rlp SET cfm=? WHERE id=?', c, r.id);
+        award(r.cb, 'sawyer', 'w:' + r.id, U); return json({ ok: true, c }); }
+      if (op === 'thank') { // Recovery / Wrench: the rider who asked for help credits the one who pulled them out or fixed them
+        const bd = b.b === 'wrench' ? 'wrench' : 'recovery'; if (r.u !== U) return err('Only the rider who asked can give this'); const c = this.q('SELECT u FROM rlc WHERE cid=? AND id=?', num(b.cid, 1, 1e12), r.id)[0];
+        if (!c) return err('Comment not found'); if (c.u === U) return err('That’s your own comment');
+        const ok = award(c.u, bd, (bd === 'wrench' ? 'f:' : 'r:') + r.id + ':' + c.u, U); return json({ ok: true, given: ok }); }
       if (op === 'flag') { this.sql.exec('INSERT OR IGNORE INTO rlr (id, u, kind) VALUES (?, ?, ?)', r.id, U, 'f'); if (this.q("SELECT count(*) AS c FROM rlr WHERE id=? AND kind='f'", r.id)[0].c >= 3) this.sql.exec('UPDATE rlp SET hid=1 WHERE id=?', r.id); return json({ ok: true }); }
       if (op === 'del') { if (r.u !== U && !isAdmin) return err('Only the poster can delete it.', 403); this.rlDel(r.id); return json({ ok: true }); }
-      if (op === 'cmts') return json({ c: this.q('SELECT cid, by, tg, x, q, ans, re, t, u=? AS me FROM rlc WHERE id=? ORDER BY (q=1 AND ans=0) DESC, cid ASC LIMIT 100', U, r.id) });
+      if (op === 'cmts') { const th = {}; this.q('SELECT ref FROM rlba WHERE ref LIKE ? OR ref LIKE ?', 'r:' + r.id + ':%', 'f:' + r.id + ':%').forEach(x => { const s = x.ref.split(':'); th[s[0] + s[2]] = 1; });
+        return json({ owner: r.u === U, kind: r.kind, c: this.q('SELECT cid, u, by, tg, x, q, ans, re, t, u=? AS me FROM rlc WHERE id=? ORDER BY (q=1 AND ans=0) DESC, cid ASC LIMIT 100', U, r.id).map(c => { const o = Object.assign({}, c, { rec: !!th['r' + c.u], wr: !!th['f' + c.u], bd: badges(c.u) }); delete o.u; return o; }) }); }
       if (op === 'cmt') { if (muted) return paused(); if (this.lim('rc' + U, 120, DAY)) return err('Too many comments today.', 429); const x = clean(b.x, 300); if (!x) return err('Empty comment');
         const re = num(b.re, 1, 1e12); this.sql.exec('INSERT INTO rlc (id, u, by, tg, x, q, re, t) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', r.id, U, isAdmin ? 'Josh Singer' : name, me.t, x, b.q ? 1 : 0, re, now);
         if (re) this.sql.exec('UPDATE rlc SET ans=1 WHERE cid=? AND id=?', re, r.id);
