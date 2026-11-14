@@ -251,7 +251,8 @@ export class Hub {
       CREATE TABLE IF NOT EXISTS rln (u TEXT PRIMARY KEY, by TEXT, tg TEXT, rig TEXT, lat REAL, lon REAL, at INTEGER);
       CREATE TABLE IF NOT EXISTS rlba (ref TEXT PRIMARY KEY, u TEXT, b TEXT, by TEXT, t INTEGER);`);
     for (const c of ['mid TEXT', 'rb TEXT', 'cb TEXT', 'cbn TEXT', 'cfm INTEGER DEFAULT 0']) try { this.sql.exec('ALTER TABLE rlp ADD COLUMN ' + c); } catch (e) {}
-    for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
+    for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT', 'pk TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
+    try { this.sql.exec('ALTER TABLE msgs ADD COLUMN e TEXT'); } catch (e) {} // end-to-end locked message (only chat members can open it)
     try { state.storage.getAlarm().then(a => { if (!a) state.storage.setAlarm(Date.now() + DAY); }).catch(() => {}); } catch (e) {}
   }
   q(s, ...a) { return this.sql.exec(s, ...a).toArray(); }
@@ -335,7 +336,7 @@ export class Hub {
       return new Response(JSON.stringify({ x }));
     }
     const p = new URL(req.url).pathname.slice(3), now = Date.now(), ip = req.headers.get('CF-Connecting-IP') || 'x';
-    let b; try { b = await body(req, p === 'backup' ? 70000 : p === 'rl' ? 900000 : 8000); } catch (e) { return err('bad request'); }
+    let b; try { b = await body(req, p === 'backup' ? 70000 : p === 'rl' ? 900000 : p === 'send' ? 14000 : 8000); } catch (e) { return err('bad request'); }
     const me = await rider(b); if (!me) return err('rider key missing');
     const U = me.u, ih = (await sha('awarebc-ip:' + ip)).slice(0, 16), isAdmin = this.admin(U);
     let name = clean(b.name, 24) || 'Rider'; if (RESERVED.test(name) && !isAdmin) name = 'Rider';
@@ -416,9 +417,14 @@ export class Hub {
       if (b.block) { this.sql.exec('INSERT OR IGNORE INTO blocks VALUES (?, ?, ?)', U, o, now); this.unfriend(U, o); }
       return json({ ok: true });
     }
+    if (p === 'pk') { const pk = String(b.pk || ''); if (!/^[A-Za-z0-9+/]{86,88}={0,2}$/.test(pk)) return err('bad key'); this.sql.exec('UPDATE riders SET pk=? WHERE u=?', pk, U); return json({ ok: true }); }
+    if (p === 'keys') { // public locks of everyone in a chat, so a phone can lock a message for them (the server never sees the unlock keys)
+      const chat = String(b.chat || ''); if (!this.canChat(U, chat)) return err('Not your chat.', 403);
+      const ids = chat[0] === 'd' ? chat.split(':').slice(1) : this.q('SELECT u FROM gm WHERE g=?', chat.slice(2)).map(r => r.u);
+      return json({ k: ids.map(id => { const r = this.q('SELECT pk FROM riders WHERE u=?', id)[0]; return { id, pk: r && r.pk || '' }; }) }); }
     if (p === 'msgs') {
       const chat = String(b.chat || ''); if (!this.canChat(U, chat)) return err('Not your chat.', 403);
-      const since = Math.max(0, +b.since || 0), rows = this.q('SELECT id, u, n, tg, x, lat, lon, t FROM msgs WHERE chat=? AND id>? AND u NOT IN (SELECT b FROM blocks WHERE a=?) ORDER BY id DESC LIMIT 100', chat, since, U).reverse();
+      const since = Math.max(0, +b.since || 0), rows = this.q('SELECT id, u, n, tg, x, e, lat, lon, t FROM msgs WHERE chat=? AND id>? AND u NOT IN (SELECT b FROM blocks WHERE a=?) ORDER BY id DESC LIMIT 100', chat, since, U).reverse();
       const top = this.q('SELECT max(id) AS m FROM msgs WHERE chat=?', chat)[0].m;
       if (top) this.sql.exec('INSERT INTO reads (u, chat, last) VALUES (?, ?, ?) ON CONFLICT(u, chat) DO UPDATE SET last=max(last, excluded.last)', U, chat, top);
       let mem = null, own = false;
@@ -426,14 +432,15 @@ export class Hub {
         mem = this.q('SELECT r.u, r.n, r.t FROM gm JOIN riders r ON r.u=gm.u WHERE gm.g=?', chat.slice(2)).map(r => ({ id: r.u, n: r.n, t: r.t, me: r.u === U, fr: r.u !== U && this.friend(U, r.u) })); }
       // ids of messages still here, so a message its writer unsent disappears for everyone
       const keep = since ? this.q('SELECT id FROM msgs WHERE chat=? ORDER BY id DESC LIMIT 100', chat).map(r => r.id) : null;
-      return json({ m: rows.map(r => ({ id: r.id, me: r.u === U, a: r.u === U ? undefined : r.u, n: r.n, tg: r.tg, x: r.x, lat: r.lat, lon: r.lon, t: r.t })), mem, own, keep });
+      return json({ m: rows.map(r => ({ id: r.id, me: r.u === U, a: r.u === U ? undefined : r.u, n: r.n, tg: r.tg, x: r.x, e: r.e || undefined, lat: r.lat, lon: r.lon, t: r.t })), mem, own, keep });
     }
     if (p === 'send') {
       if (muted) return paused();
       const chat = String(b.chat || ''); if (!this.canChat(U, chat)) return err('Not your chat.', 403);
       if (this.lim('m' + U, 60, 10 * 60000) || this.lim('mi' + ih, 150, 10 * 60000)) return err('Too many messages. Wait a few minutes.', 429);
-      const x = clean(b.text, 500), lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (!x && lat == null) return err('Empty message.');
-      const r = this.q('INSERT INTO msgs (chat, u, n, tg, x, lat, lon, t) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id', chat, U, name, me.t, x, lat == null ? null : +lat.toFixed(5), lon == null ? null : +lon.toFixed(5), now)[0];
+      const e = String(b.e || ''); if (e && (e.length > 12000 || !/^\{"v":1,/.test(e))) return err('Locked message not accepted.');
+      const x = e ? '' : clean(b.text, 500), lat = e ? null : num(b.lat, -90, 90), lon = e ? null : num(b.lon, -180, 180); if (!e && !x && lat == null) return err('Empty message.');
+      const r = this.q('INSERT INTO msgs (chat, u, n, tg, x, e, lat, lon, t) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id', chat, U, name, me.t, x, e || null, lat == null ? null : +lat.toFixed(5), lon == null ? null : +lon.toFixed(5), now)[0];
       this.sql.exec('INSERT INTO reads (u, chat, last) VALUES (?, ?, ?) ON CONFLICT(u, chat) DO UPDATE SET last=excluded.last', U, chat, r.id);
       if (r.id % 50 === 0) this.sql.exec('DELETE FROM msgs WHERE chat=? AND id < (SELECT id FROM msgs WHERE chat=? ORDER BY id DESC LIMIT 1 OFFSET 499)', chat, chat);
       return json({ ok: true, id: r.id, t: now });
