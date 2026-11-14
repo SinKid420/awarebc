@@ -167,6 +167,25 @@ try { const r = await fetch('https://overturemaps-extras-us-west-2.s3.us-west-2.
 if (r.ok) { const x = await r.text(), L = [...x.matchAll(/<Prefix>tiles\/(\d{4}-\d{2}-\d{2}\.\d+)\/<\/Prefix>/g)].map(m => m[1]).sort(); rel = L[L.length - 1] || ''; } } catch (e) {}
 body = JSON.stringify({ release: rel }); ctx.waitUntil(caches.default.put(key, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=' + (rel ? 43200 : 600) } }))); }
 return new Response(body, { status: 200, headers: { ...cors(allowOrigin), 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } }); }
+if (q.has('rad')) { // Health Canada Fixed Point Surveillance: live gamma dose rate at stations across Canada (latest per station, µSv/h)
+const key = new Request('https://rad.cache/fpsn2'); let hit = await caches.default.match(key), body;
+if (hit) body = await hit.text(); else { const B = 'https://maps-cartes.services.geo.ca/server_serveur/rest/services/HC/fpsn_en/MapServer'; let out = { s: [] };
+try { const info = await (await fetch(B + '?f=json')).json(); const L = [...(info.layers || []), ...(info.tables || [])].slice(0, 8);
+for (const ly of L) { let j; try { j = await (await fetch(B + '/' + ly.id + '/query?where=1%3D1&outFields=*&outSR=4326&returnGeometry=true&resultRecordCount=5000&f=json')).json(); } catch (e) { continue; }
+const F = j.fields || [], num = /Double|Single|Integer|SmallInteger/;
+const vf = F.find(f => num.test(f.type) && /dose|nsv|usv|µsv|rate|reading|value|result/i.test(f.name + ' ' + (f.alias || '')) && !/lat|lon|objectid|^id$|_id|count|uncert|error/i.test(f.name));
+const tf = F.find(f => f.type === 'esriFieldTypeDate') || F.find(f => /date|time/i.test(f.name));
+const nf = F.find(f => f.type === 'esriFieldTypeString' && /name|station|site|city|location|place|nom/i.test(f.name + ' ' + (f.alias || '')));
+const xf = F.find(f => /^(lon|long|longitude|x)$/i.test(f.name)), yf = F.find(f => /^(lat|latitude|y)$/i.test(f.name));
+if (!vf || !j.features || !j.features.length) continue; const by = {};
+for (const ft of j.features) { const a = ft.attributes || {}, g = ft.geometry || {}; const lat = g.y != null ? g.y : yf ? +a[yf.name] : NaN, lon = g.x != null ? g.x : xf ? +a[xf.name] : NaN, v = +a[vf.name];
+if (!isFinite(lat) || !isFinite(lon) || !isFinite(v) || v <= 0) continue; const tv = tf ? a[tf.name] : null, t = typeof tv === 'number' ? tv : Date.parse(tv) || 0;
+const n = String(nf ? a[nf.name] : '').slice(0, 60) || (lat.toFixed(2) + ',' + lon.toFixed(2)), k = n + '|' + lat.toFixed(2); if (!by[k] || t > by[k][4]) by[k] = [n, +lat.toFixed(3), +lon.toFixed(3), v, t]; }
+let S = Object.values(by); if (!S.length) continue; const med = S.map(x => x[3]).sort((p, q2) => p - q2)[Math.floor(S.length / 2)];
+const nsv = /nsv/i.test(vf.name + ' ' + (vf.alias || '')) || med > 5; S = S.map(x => [x[0], x[1], x[2], +(nsv ? x[3] / 1000 : x[3]).toFixed(3), x[4]]);
+out = { s: S, f: [ly.id, vf.name, tf ? tf.name : '', nf ? nf.name : ''] }; break; } } catch (e) {}
+body = JSON.stringify(out); ctx.waitUntil(caches.default.put(key, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=' + (out.s.length ? 1800 : 300) } }))); }
+return new Response(body, { status: 200, headers: { ...cors(allowOrigin), 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } }); }
 if (q.has('flood')) { // BC River Forecast Centre: flood warnings, watches and high streamflow advisories in effect
 if (tooMany(ip, phoneHits, PHONE_PER_MIN)) return reply('Slow down', 429, allowOrigin, { 'Retry-After': '30' });
 const key = new Request('https://flood.cache/bc');

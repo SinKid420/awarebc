@@ -108,7 +108,7 @@ export default {
   async fetch(req, env, ctx) {
     if (env.HUB) env = Object.assign({}, env, { REPORTS: store(env) });
     // flight relay: https://<this server>/?u=<feed address>  (and ?phone=)
-    { const q0 = new URL(req.url); if (q0.pathname === '/' && (q0.searchParams.has('u') || q0.searchParams.has('phone') || q0.searchParams.has('flood') || q0.searchParams.has('overture'))) return relay.fetch(req, env, ctx); }
+    { const q0 = new URL(req.url); if (q0.pathname === '/' && (q0.searchParams.has('u') || q0.searchParams.has('phone') || q0.searchParams.has('flood') || q0.searchParams.has('overture') || q0.searchParams.has('rad'))) return relay.fetch(req, env, ctx); }
     const origin = req.headers.get('Origin') || '';
     if (req.method === 'OPTIONS') return new Response(null, { status: origin === ORIGIN ? 204 : 403, headers: hdr() });
     if (origin !== ORIGIN && !(req.method === 'GET' && /^\/(photo|thumb)\//.test(new URL(req.url).pathname))) return err('not allowed', 403);
