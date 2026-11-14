@@ -482,10 +482,10 @@ export class Hub {
       const media = (d, max, rx) => { const m = rx.exec(String(d || '')); if (!m || m[2].length > max * 1.37) return null; const bin = atob(m[2]), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return { ty: m[1], v: u }; };
       const JP = /^data:(image\/jpeg);base64,([A-Za-z0-9+/=]+)$/, AU = /^data:(audio\/(?:webm|ogg|mp4|aac|mpeg)(?:;codecs=[a-z0-9.]+)?);base64,([A-Za-z0-9+/=]+)$/;
       const out = r => { const mine = this.q('SELECT kind FROM rlr WHERE id=? AND u=?', r.id, U).map(x => x.kind);
-        const cm = this.q('SELECT cid, by, tg, x, q, ans, t FROM rlc WHERE id=? ORDER BY (q=1 AND ans=0) DESC, cid DESC LIMIT 2', r.id);
+        const cm = this.q('SELECT cid, u, by, tg, x, q, ans, t FROM rlc WHERE id=? ORDER BY (q=1 AND ans=0) DESC, cid DESC LIMIT 2', r.id).map(c => { const o = Object.assign({}, c, { fd: !!this.admin(c.u) }); delete o.u; return o; });
         return { id: r.id, t: r.t, by: r.by, tg: r.tg, kind: r.kind, lat: r.lat, lon: r.lon, x: r.x, el: r.el, tc: r.tc, st: r.st, rig: r.rig, tags: JSON.parse(r.tags || '[]'), parts: r.parts || '', radio: r.radio || '',
           img: r.img || '', au: r.au || '', aud: r.aud || 0, likes: r.likes, ver: r.ver, nc: r.nc, me: r.u === U, liked: mine.includes('l'), verd: mine.includes('v'), cm,
-          rb: r.rb || '', cb: r.cbn || '', cbme: !!r.cb && r.cb === U, cfm: r.cfm || 0, cfmd: mine.includes('k'), bd: badges(r.u) }; };
+          rb: r.rb || '', cb: r.cbn || '', cbme: !!r.cb && r.cb === U, cfm: r.cfm || 0, cfmd: mine.includes('k'), bd: badges(r.u), fd: !!(r.u && this.admin(r.u)) }; };
       // ---- badges: Recovery, Sawyer, Scout, Wrench, Relay (Bronze 3 · Silver 10 · Gold 25) ----
       const BDG = ['recovery', 'sawyer', 'scout', 'wrench', 'relay'], bcache = {};
       const badges = u => { if (!u) return {}; if (bcache[u]) return bcache[u]; const o = {}; this.q('SELECT b, n FROM rlb WHERE u=?', u).forEach(x => { o[x.b] = x.n; }); return bcache[u] = o; };
@@ -497,7 +497,7 @@ export class Hub {
       if (op === 'join') return json({ ok: true, key: key ? key.txt : '' });
       if (op === 'prof') { const tg = clean(b.tg, 6).toUpperCase(); const rr = !tg || tg === me.t ? { u: U, n: name, t: me.t } : this.q('SELECT u, n, t FROM riders WHERE t=?', tg)[0]; if (!rr) return err('Rider not found', 404);
         const lastRig = this.q("SELECT rig, tags FROM rlp WHERE u=? AND kind='r' AND hid=0 AND k='' ORDER BY t DESC LIMIT 1", rr.u)[0];
-        return json({ n: rr.u === U ? name : rr.n, t: rr.t, me: rr.u === U, bd: badges(rr.u), posts: this.q('SELECT count(*) AS c FROM rlp WHERE u=? AND hid=0', rr.u)[0].c, rig: lastRig ? lastRig.rig : '', tags: lastRig ? JSON.parse(lastRig.tags || '[]') : [] }); }
+        return json({ n: this.admin(rr.u) ? 'Josh Singer' : rr.u === U ? name : rr.n, t: rr.t, me: rr.u === U, fd: !!this.admin(rr.u), bd: badges(rr.u), posts: this.q('SELECT count(*) AS c FROM rlp WHERE u=? AND hid=0', rr.u)[0].c, rig: lastRig ? lastRig.rig : '', tags: lastRig ? JSON.parse(lastRig.tags || '[]') : [] }); }
       if (op === 'relay') { // a post carried phone to phone through a dead zone, uploaded by the first phone with signal (public posts only)
         if (key) return err('Convoy posts are not relayed'); const mid = clean(b.mid, 24), tg = clean(b.tg, 6).toUpperCase(), lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180), kind = ['c', 'h'].includes(b.kind) ? b.kind : null;
         if (!/^[a-z0-9]{8,24}$/.test(mid) || !/^[A-Z0-9]{4}$/.test(tg) || lat == null || lon == null || !kind) return err('bad relay');
@@ -546,7 +546,7 @@ export class Hub {
       if (op === 'flag') { this.sql.exec('INSERT OR IGNORE INTO rlr (id, u, kind) VALUES (?, ?, ?)', r.id, U, 'f'); if (this.q("SELECT count(*) AS c FROM rlr WHERE id=? AND kind='f'", r.id)[0].c >= 3) this.sql.exec('UPDATE rlp SET hid=1 WHERE id=?', r.id); return json({ ok: true }); }
       if (op === 'del') { if (r.u !== U && !isAdmin) return err('Only the poster can delete it.', 403); this.rlDel(r.id); return json({ ok: true }); }
       if (op === 'cmts') { const th = {}; this.q('SELECT ref FROM rlba WHERE ref LIKE ? OR ref LIKE ?', 'r:' + r.id + ':%', 'f:' + r.id + ':%').forEach(x => { const s = x.ref.split(':'); th[s[0] + s[2]] = 1; });
-        return json({ owner: r.u === U, kind: r.kind, c: this.q('SELECT cid, u, by, tg, x, q, ans, re, t, u=? AS me FROM rlc WHERE id=? ORDER BY (q=1 AND ans=0) DESC, cid ASC LIMIT 100', U, r.id).map(c => { const o = Object.assign({}, c, { rec: !!th['r' + c.u], wr: !!th['f' + c.u], bd: badges(c.u) }); delete o.u; return o; }) }); }
+        return json({ owner: r.u === U, kind: r.kind, c: this.q('SELECT cid, u, by, tg, x, q, ans, re, t, u=? AS me FROM rlc WHERE id=? ORDER BY (q=1 AND ans=0) DESC, cid ASC LIMIT 100', U, r.id).map(c => { const o = Object.assign({}, c, { rec: !!th['r' + c.u], wr: !!th['f' + c.u], bd: badges(c.u), fd: !!this.admin(c.u) }); delete o.u; return o; }) }); }
       if (op === 'cmt') { if (muted) return paused(); if (this.lim('rc' + U, 120, DAY)) return err('Too many comments today.', 429); const x = clean(b.x, 300); if (!x) return err('Empty comment');
         const re = num(b.re, 1, 1e12); this.sql.exec('INSERT INTO rlc (id, u, by, tg, x, q, re, t) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', r.id, U, isAdmin ? 'Josh Singer' : name, me.t, x, b.q ? 1 : 0, re, now);
         if (re) this.sql.exec('UPDATE rlc SET ans=1 WHERE cid=? AND id=?', re, r.id);
