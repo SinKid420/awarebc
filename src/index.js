@@ -34,6 +34,7 @@ function hdr(extra) {
 }
 const json = (o, s, c) => new Response(JSON.stringify(o), { status: s || 200, headers: hdr({ 'Content-Type': 'application/json', 'Cache-Control': c || 'no-store' }) });
 const err = (m, s) => json({ error: m }, s || 400);
+const pname = (s, me, env) => { const n = clean(s, 24); return !n ? 'Trail user' : RESERVED.test(n) && !(me && String(env.ADMINS || '').split(/[\s,]+/).includes(me.u)) ? 'Trail user' : n; };
 const clean = (s, n) => String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n);
 const num = (v, a, b) => { v = +v; return isFinite(v) && v >= a && v <= b ? v : null; };
 const rid = () => { const a = new Uint8Array(9); crypto.getRandomValues(a); return [...a].map(b => b.toString(36).padStart(2, '0')).join('').slice(0, 14); };
@@ -148,7 +149,7 @@ export default {
         const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180), st = ST.includes(b.st) ? b.st : null;
         if (lat == null || lon == null || !st) return err('missing spot or status');
         const r = { id: rid(), lat: +lat.toFixed(5), lon: +lon.toFixed(5), st, tg: (Array.isArray(b.tg) ? b.tg : []).filter(t => TAGS.includes(t)).slice(0, 7),
-          n: clean(b.note, 200), by: clean(b.by, 24) || 'Trail user', t: Date.now(), nc: 0, f: 0, ph: false, k: await sha(clean(b.key, 64) || rid()), u: me ? me.u : '', ut: me ? me.t : '' };
+          n: clean(b.note, 200), by: pname(b.by, me, env), t: Date.now(), nc: 0, f: 0, ph: false, k: await sha(clean(b.key, 64) || rid()), u: me ? me.u : '', ut: me ? me.t : '' };
         const img = b.img ? b64bytes(b.img, 480000) : null, th = b.th ? b64bytes(b.th, 40000) : null;
         if (b.img && !img) return err('photo not accepted');
         if (img) { await env.REPORTS.put('p:' + r.id, img); if (th) await env.REPORTS.put('t:' + r.id, th); r.ph = true; }
@@ -159,12 +160,12 @@ export default {
       const mc = /^\/c\/([a-z0-9]{8,20})$/.exec(p);
       if (mc) {
         const id = mc[1];
-        if (req.method === 'GET') { const c = await env.REPORTS.get('c:' + id, 'json'); return json({ c: (c || []).filter(x => !x.hid).map(x => ({ by: x.by, x: x.x, t: x.t, ut: x.ut || '' })) }); }
+        if (req.method === 'GET') { const a0 = await getIdx(env), r0 = a0.find(q => q.id === id); if (!r0 || r0.hid) return json({ c: [] }); const c = await env.REPORTS.get('c:' + id, 'json'); return json({ c: (c || []).filter(x => !x.hid).map(x => ({ by: x.by, x: x.x, t: x.t, ut: x.ut || '' })) }); }
         if (req.method === 'POST') {
           if (await lim(env, ip, 'c', 40)) return err('Too many comments this hour.', 429);
           const b = await body(req, 4000), x = clean(b.text, 300), me = await rider(b); if (!x) return err('empty comment');
           const a = await getIdx(env), r = a.find(q => q.id === id); if (!r || r.hid) return err('report not found', 404);
-          const c = (await env.REPORTS.get('c:' + id, 'json')) || []; c.push({ by: clean(b.by, 24) || 'Trail user', x, t: Date.now(), u: me ? me.u : '', ut: me ? me.t : '' });
+          const c = (await env.REPORTS.get('c:' + id, 'json')) || []; c.push({ by: pname(b.by, me, env), x, t: Date.now(), u: me ? me.u : '', ut: me ? me.t : '' });
           await env.REPORTS.put('c:' + id, JSON.stringify(c.slice(-100))); r.nc = c.length; await putIdx(env, a);
           return json({ ok: true, nc: r.nc, ut: me ? me.t : '' });
         }
@@ -186,7 +187,7 @@ export default {
         const me = await rider(b), who = me ? me.u : 'ip' + (await sha(ip)).slice(0, 12), own = !!(me && r.u && me.u === r.u);
         // a danger report needs the poster, or 2 different riders, to clear it
         if (!own && r.st !== 'ok') { r.cv = r.cv || []; if (!r.cv.includes(who)) r.cv.push(who); if (r.cv.length < 2) { await putIdx(env, a); return json({ ok: true, need: 1, cv: r.cv.length }); } }
-        r.cl = Date.now(); r.cb = (clean(b.by, 24) || 'Trail user') + (me ? ' #' + me.t : ''); await putIdx(env, a);
+        r.cl = Date.now(); r.cb = pname(b.by, me, env) + (me ? ' #' + me.t : ''); await putIdx(env, a);
         return json({ ok: true, cl: r.cl, cb: r.cb });
       }
       // delete your own report (the app keeps a private key for each report you post)
@@ -215,7 +216,7 @@ const RL_DAYS = 14, MSG_DAYS = 30, IDLE_DAYS = 365, FLAG_DAYS = 90, MUTE = 7 * D
 const WHY = ['spam', 'harass', 'scam', 'unsafe', 'other'];
 const ID = /^[0-9a-f]{24}$/, GID = /^[a-z0-9]{8,20}$/;
 const dmId = (a, b) => 'd:' + [a, b].sort().join(':');
-const RESERVED = /\b(admin|moderator|mod|awarebc|support|staff|official)\b/i;
+const RESERVED = /\b(admin|administrator|moderator|mod|awarebc|aware bc|support|staff|official|founder|creator|developer)\b|josh\W*singer/i;
 export class Hub {
   constructor(state, env) {
     this.state = state; this.env = env || {}; this.sql = state.storage.sql; this.hits = new Map();
@@ -250,7 +251,7 @@ export class Hub {
       CREATE TABLE IF NOT EXISTS rlb (u TEXT, b TEXT, n INTEGER, PRIMARY KEY (u, b));
       CREATE TABLE IF NOT EXISTS rln (u TEXT PRIMARY KEY, by TEXT, tg TEXT, rig TEXT, lat REAL, lon REAL, at INTEGER);
       CREATE TABLE IF NOT EXISTS rlba (ref TEXT PRIMARY KEY, u TEXT, b TEXT, by TEXT, t INTEGER);`);
-    for (const c of ['mid TEXT', 'rb TEXT', 'cb TEXT', 'cbn TEXT', 'cfm INTEGER DEFAULT 0']) try { this.sql.exec('ALTER TABLE rlp ADD COLUMN ' + c); } catch (e) {}
+    for (const c of ['mid TEXT', 'rb TEXT', 'rbu TEXT', 'cb TEXT', 'cbn TEXT', 'cfm INTEGER DEFAULT 0']) try { this.sql.exec('ALTER TABLE rlp ADD COLUMN ' + c); } catch (e) {}
     for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT', 'pk TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
     try { this.sql.exec('ALTER TABLE msgs ADD COLUMN e TEXT'); } catch (e) {} // end-to-end locked message (only chat members can open it)
     try { state.storage.getAlarm().then(a => { if (!a) state.storage.setAlarm(Date.now() + DAY); }).catch(() => {}); } catch (e) {}
@@ -493,7 +494,7 @@ export class Hub {
         const cm = this.q('SELECT cid, u, by, tg, x, q, ans, t FROM rlc WHERE id=? ORDER BY (q=1 AND ans=0) DESC, cid DESC LIMIT 2', r.id).map(c => { const o = Object.assign({}, c, { fd: !!this.admin(c.u) }); delete o.u; return o; });
         return { id: r.id, t: r.t, by: r.by, tg: r.tg, kind: r.kind, lat: r.lat, lon: r.lon, x: r.x, el: r.el, tc: r.tc, st: r.st, rig: r.rig, tags: JSON.parse(r.tags || '[]'), parts: r.parts || '', radio: r.radio || '',
           img: r.img || '', au: r.au || '', aud: r.aud || 0, likes: r.likes, ver: r.ver, nc: r.nc, me: r.u === U, liked: mine.includes('l'), verd: mine.includes('v'), cm,
-          rb: r.rb || '', cb: r.cbn || '', cbme: !!r.cb && r.cb === U, cfm: r.cfm || 0, cfmd: mine.includes('k'), bd: badges(r.u), fd: !!(r.u && this.admin(r.u)) }; };
+          rb: r.rb || '', uc: !!(r.rb && !r.u), cb: r.cbn || '', cbme: !!r.cb && r.cb === U, cfm: r.cfm || 0, cfmd: mine.includes('k'), bd: badges(r.u), fd: !!(r.u && this.admin(r.u)) }; };
       // ---- badges: Recovery, Sawyer, Scout, Wrench, Relay (Bronze 3 · Silver 10 · Gold 25) ----
       const BDG = ['recovery', 'sawyer', 'scout', 'wrench', 'relay'], bcache = {};
       const badges = u => { if (!u) return {}; if (bcache[u]) return bcache[u]; const o = {}; this.q('SELECT b, n FROM rlb WHERE u=?', u).forEach(x => { o[x.b] = x.n; }); return bcache[u] = o; };
@@ -526,8 +527,9 @@ export class Hub {
         if (this.lim('ry' + U, 20, DAY) || this.lim('ryi' + ih, 40, DAY)) return err('Too many relays today.', 429);
         const au = this.q('SELECT u, n FROM riders WHERE t=?', tg)[0], x = clean(b.x, 500), st = clean(b.st, 20); if (!x && !st) return err('empty');
         const id = rid(); this.sql.exec('INSERT INTO rlp (id, t, u, by, tg, k, kind, lat, lon, x, el, tc, st, rig, tags, parts, radio, img, au, aud, mid, rb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          id, Math.min(now, num(b.t, now - 2 * DAY, now) || now), au ? au.u : '', au ? au.n : clean(b.by, 24) || 'Rider', tg, '', kind, +lat.toFixed(5), +lon.toFixed(5), x, num(b.el, -500, 9000) != null ? Math.round(b.el) : null, num(b.tc, -60, 60), st, '', '[]', '', '', '', '', 0, mid, name);
-        const got = au && au.u !== U ? award(U, 'relay', 'y:' + mid, au.u) : false; return json({ ok: true, relay: got }); }
+          id, Math.min(now, num(b.t, now - 2 * DAY, now) || now), '', au ? (this.admin(au.u) ? 'Josh Singer' : au.n) : 'Rider', tg, '', kind, +lat.toFixed(5), +lon.toFixed(5), x, num(b.el, -500, 9000) != null ? Math.round(b.el) : null, num(b.tc, -60, 60), st, '', '[]', '', '', '', '', 0, mid, name);
+        this.sql.exec('UPDATE rlp SET rbu=? WHERE id=?', U, id); // the relay badge is given once the author's own phone confirms the post
+        return json({ ok: true, relay: false }); }
       if (op === 'feed') { const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (lat == null || lon == null) return err('No spot');
         if (b.here) this.sql.exec('INSERT OR REPLACE INTO rlg (k, u, by, tg, rig, lat, lon, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', kh, U, name, me.t, clean(b.rig, 40), key && b.share ? +lat.toFixed(5) : +lat.toFixed(2), key && b.share ? +lon.toFixed(5) : +lon.toFixed(2), b.share || !key ? now : now);
         const box = [lat - 1.2, lat + 1.2, lon - 2, lon + 2], K = ['c', 'r', 'h'].includes(b.f) ? b.f : '';
@@ -536,7 +538,7 @@ export class Hub {
         return json({ p: ps.map(out), n: rigs.length, rigs: key ? rigs.filter(r => r.u !== U).map(r => ({ by: r.by, tg: r.tg, rig: r.rig, lat: r.lat, lon: r.lon, at: r.at })) : [], key: key ? key.txt : '' }); }
       if (op === 'post') { if (muted) return paused(); if (this.lim('rp' + U, isAdmin ? 300 : 25, DAY) || this.lim('rpi' + ih, 60, DAY)) return err('That\'s a lot of posts today. Try again tomorrow.', 429);
         const kind = ['c', 'r', 'h'].includes(b.kind) ? b.kind : null, lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (!kind || lat == null || lon == null) return err('Missing spot');
-        const mid = /^[a-z0-9]{8,24}$/.test(String(b.mid || '')) ? String(b.mid) : null; if (mid) { const d = this.q('SELECT id FROM rlp WHERE mid=?', mid)[0]; if (d) { this.sql.exec('UPDATE rlp SET u=? WHERE id=? AND (u IS NULL OR u=\'\')', U, d.id); return json({ ok: true, dup: true }); } }
+        const mid = /^[a-z0-9]{8,24}$/.test(String(b.mid || '')) ? String(b.mid) : null; if (mid) { const d = this.q('SELECT id, u, tg, rbu FROM rlp WHERE mid=?', mid)[0]; if (d) { if (!d.u && d.tg === me.t) { this.sql.exec('UPDATE rlp SET u=?, by=? WHERE id=?', U, isAdmin ? 'Josh Singer' : name, d.id); if (d.rbu && d.rbu !== U) award(d.rbu, 'relay', 'y:' + mid, U); } return json({ ok: true, dup: true }); } }
         const x = clean(b.x, 500), hide = !!b.hide, id = rid(); let img = '', au = '';
         if (b.img) { const m = media(b.img, 320000, JP); if (!m || m.v[0] !== 0xff || m.v[1] !== 0xd8) return err('Photo not accepted'); img = rid() + rid(); this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', img, m.ty, m.v, now);
           const th = b.th ? media(b.th, 40000, JP) : null; if (th) this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', img + 't', th.ty, th.v, now); }
