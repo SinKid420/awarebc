@@ -214,6 +214,8 @@ export default {
 const HOUR = 3600000, DAY = 24 * HOUR, ONLINE = 5 * 60000, SPOT_AGE = 6 * HOUR;
 const RL_DAYS = 14, MSG_DAYS = 30, IDLE_DAYS = 365, FLAG_DAYS = 90, MUTE = 7 * DAY, MAX_FRIENDS = 500, MAX_GROUPS = 50;
 const WHY = ['spam', 'harass', 'scam', 'unsafe', 'other'];
+// plain profile badges a rider picks for themselves (up to 5), shown after the badges they earned
+const PB = ['overland', 'camp', 'fish', 'hunt', 'sled', 'dirt', 'sxs', '4x4', 'photo', 'ham', 'aid', 'dog', 'log', 'ranch', 'local'];
 const ID = /^[0-9a-f]{24}$/, GID = /^[a-z0-9]{8,20}$/;
 const dmId = (a, b) => 'd:' + [a, b].sort().join(':');
 const RESERVED = /\b(admin|administrator|moderator|mod|awarebc|aware bc|support|staff|official|founder|creator|developer)\b|josh\W*singer/i;
@@ -253,7 +255,7 @@ export class Hub {
       CREATE TABLE IF NOT EXISTS rlba (ref TEXT PRIMARY KEY, u TEXT, b TEXT, by TEXT, t INTEGER);`);
     for (const c of ['mid TEXT', 'rb TEXT', 'rbu TEXT', 'cb TEXT', 'cbn TEXT', 'cfm INTEGER DEFAULT 0']) try { this.sql.exec('ALTER TABLE rlp ADD COLUMN ' + c); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rln ADD COLUMN ex INTEGER DEFAULT 0'); } catch (e) {}
-    for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT', 'pk TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
+    for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT', 'pk TEXT', 'pb TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
     try { this.sql.exec('ALTER TABLE msgs ADD COLUMN e TEXT'); } catch (e) {} // end-to-end locked message (only chat members can open it)
     try { state.storage.getAlarm().then(a => { if (!a) state.storage.setAlarm(Date.now() + DAY); }).catch(() => {}); } catch (e) {}
   }
@@ -519,9 +521,11 @@ export class Hub {
         const r = this.q('SELECT u, by, tg, rig, lat, lon, at, ex FROM rln WHERE u<>? AND at>? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? ORDER BY at DESC LIMIT 60', U, now - 15 * 60000, lat - 0.6, lat + 0.6, lon - 0.9, lon + 0.9);
         const bl = new Set(this.q('SELECT b FROM blocks WHERE a=?', U).map(x => x.b).concat(this.q('SELECT a FROM blocks WHERE b=?', U).map(x => x.a)));
         return json({ r: r.filter(x => !bl.has(x.u)).map(x => ({ by: x.by, tg: x.tg, rig: x.rig, lat: x.lat, lon: x.lon, at: x.at, ex: !!x.ex, fd: !!this.admin(x.u) })) }); }
+      if (op === 'pb') { const pb = [...new Set((Array.isArray(b.pb) ? b.pb : []).map(String))].filter(x => PB.includes(x)).slice(0, 5); this.sql.exec('UPDATE riders SET pb=? WHERE u=?', pb.join(','), U); return json({ ok: true, pb }); }
       if (op === 'prof') { const tg = clean(b.tg, 6).toUpperCase(); const rr = !tg || tg === me.t ? { u: U, n: name, t: me.t } : this.q('SELECT u, n, t FROM riders WHERE t=?', tg)[0]; if (!rr) return err('Rider not found', 404);
         const lastRig = this.q("SELECT rig, tags FROM rlp WHERE u=? AND kind='r' AND hid=0 AND k='' ORDER BY t DESC LIMIT 1", rr.u)[0];
-        return json({ n: this.admin(rr.u) ? 'Josh Singer' : rr.u === U ? name : rr.n, t: rr.t, me: rr.u === U, fd: !!this.admin(rr.u), bd: badges(rr.u), posts: this.q('SELECT count(*) AS c FROM rlp WHERE u=? AND hid=0', rr.u)[0].c, rig: lastRig ? lastRig.rig : '', tags: lastRig ? JSON.parse(lastRig.tags || '[]') : [] }); }
+        const pbr = this.q('SELECT pb FROM riders WHERE u=?', rr.u)[0];
+        return json({ pb: String(pbr && pbr.pb || '').split(',').filter(x => PB.includes(x)), n: this.admin(rr.u) ? 'Josh Singer' : rr.u === U ? name : rr.n, t: rr.t, me: rr.u === U, fd: !!this.admin(rr.u), bd: badges(rr.u), posts: this.q('SELECT count(*) AS c FROM rlp WHERE u=? AND hid=0', rr.u)[0].c, rig: lastRig ? lastRig.rig : '', tags: lastRig ? JSON.parse(lastRig.tags || '[]') : [] }); }
       if (op === 'relay') { // a post carried phone to phone through a dead zone, uploaded by the first phone with signal (public posts only)
         if (key) return err('Convoy posts are not relayed'); const mid = clean(b.mid, 24), tg = clean(b.tg, 6).toUpperCase(), lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180), kind = ['c', 'h'].includes(b.kind) ? b.kind : null;
         if (!/^[a-z0-9]{8,24}$/.test(mid) || !/^[A-Z0-9]{4}$/.test(tg) || lat == null || lon == null || !kind) return err('bad relay');
