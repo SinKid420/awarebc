@@ -264,6 +264,7 @@ export class Hub {
     for (const c of ['mid TEXT', 'rb TEXT', 'rbu TEXT', 'cb TEXT', 'cbn TEXT', 'cfm INTEGER DEFAULT 0']) try { this.sql.exec('ALTER TABLE rlp ADD COLUMN ' + c); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rln ADD COLUMN ex INTEGER DEFAULT 0'); } catch (e) {}
     try { this.sql.exec('ALTER TABLE chk ADD COLUMN pushed INTEGER DEFAULT 0'); } catch (e) {}
+    try { this.sql.exec('ALTER TABLE rlg ADD COLUMN role TEXT'); } catch (e) {}
     for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT', 'pk TEXT', 'pb TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
     try { this.sql.exec('ALTER TABLE msgs ADD COLUMN e TEXT'); } catch (e) {} // end-to-end locked message (only chat members can open it)
     try { state.storage.getAlarm().then(a => { if (!a) state.storage.setAlarm(Date.now() + DAY); }).catch(() => {}); } catch (e) {}
@@ -560,7 +561,7 @@ export class Hub {
       // help calls: how many riders seen nearby in the last 15 min have first aid or recovery gear
       const helpers = (lat, lon) => { const rows = this.q("SELECT f.sk FROM rln n JOIN rlpf f ON f.u=n.u WHERE n.u<>? AND n.at>? AND n.lat BETWEEN ? AND ? AND n.lon BETWEEN ? AND ? AND f.sk<>''", U, now - 15 * 60000, lat - 0.6, lat + 0.6, lon - 0.9, lon + 0.9);
         return { aid: rows.filter(r => /\baid\b/.test(r.sk)).length, rec: rows.filter(r => /\brec\b/.test(r.sk)).length }; };
-      const BDG = ['recovery', 'sawyer', 'scout', 'wrench', 'relay'], bcache = {};
+      const BDG = ['recovery', 'sawyer', 'scout', 'wrench', 'relay', 'explorer'], bcache = {};
       const badges = u => { if (!u) return {}; if (bcache[u]) return bcache[u]; const o = {}; this.q('SELECT b, n FROM rlb WHERE u=?', u).forEach(x => { o[x.b] = x.n; }); return bcache[u] = o; };
       const award = (u, bd, ref, by) => { if (!u || !BDG.includes(bd) || this.q('SELECT 1 FROM rlba WHERE ref=?', ref).length) return false; this.sql.exec('INSERT INTO rlba (ref, u, b, by, t) VALUES (?, ?, ?, ?, ?)', ref, u, bd, by || '', now);
         this.sql.exec('INSERT INTO rlb (u, b, n) VALUES (?, ?, 1) ON CONFLICT(u, b) DO UPDATE SET n=n+1', u, bd); delete bcache[u]; return true; };
@@ -570,9 +571,10 @@ export class Hub {
       if (op === 'join') return json({ ok: true, key: key ? key.txt : '' });
       if (op === 'crigs') { // convoy rigs for the main map (Off-road), and my own spot if I share it with the convoy
         if (!key) return err('No convoy'); const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (lat == null || lon == null) return err('No spot');
-        if (b.share) this.sql.exec('INSERT OR REPLACE INTO rlg (k, u, by, tg, rig, lat, lon, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', kh, U, isAdmin ? 'Josh Singer' : name, me.t, clean(b.rig, 40), +lat.toFixed(5), +lon.toFixed(5), now);
-        const r = this.q('SELECT u, by, tg, rig, lat, lon, at FROM rlg WHERE k=? AND u<>? AND at>? LIMIT 60', kh, U, now - 30 * 60000);
-        return json({ r: r.map(x => ({ by: x.by, tg: x.tg, rig: x.rig, lat: x.lat, lon: x.lon, at: x.at, fd: !!this.admin(x.u) })) }); }
+        const role = ['lead', 'sweep'].includes(b.role) ? b.role : '';
+        if (b.share) this.sql.exec('INSERT OR REPLACE INTO rlg (k, u, by, tg, rig, lat, lon, at, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', kh, U, isAdmin ? 'Josh Singer' : name, me.t, clean(b.rig, 40), +lat.toFixed(5), +lon.toFixed(5), now, role);
+        const r = this.q('SELECT u, by, tg, rig, lat, lon, at, role FROM rlg WHERE k=? AND u<>? AND at>? LIMIT 60', kh, U, now - 30 * 60000);
+        return json({ r: r.map(x => ({ by: x.by, tg: x.tg, rig: x.rig, lat: x.lat, lon: x.lon, at: x.at, role: x.role || '', fd: !!this.admin(x.u) })) }); }
       if (op === 'near') { // Nearby riders (Off-road, opt-in): see and be seen, rough spot only (about 1 km)
         const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (lat == null || lon == null) return err('No spot');
         if (!b.share) { this.sql.exec('DELETE FROM rln WHERE u=?', U); return json({ r: [] }); }
@@ -598,6 +600,9 @@ export class Hub {
           if (b[k]) { const m = media(b[k], max, JP); if (!m || m.v[0] !== 0xff || m.v[1] !== 0xd8) return err('Photo not accepted'); id = rid() + rid(); this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', id, m.ty, m.v, now); }
           if (old[k]) this.sql.exec('DELETE FROM rlm WHERE id=?', old[k]); this.sql.exec('UPDATE rlpf SET ' + k + '=? WHERE u=?', id, U); }
         return json({ ok: true, pf: pfOf(U) }); }
+      if (op === 'visit') { // Explorer: reached a summit, pass or lookout (each place counts once per rider)
+        const pid = clean(b.pid, 24); if (!/^[a-z0-9:_-]{2,24}$/i.test(pid)) return err('bad place'); if (this.lim('vs' + U, 30, DAY)) return json({ ok: true, given: false });
+        const got = award(U, 'explorer', 'v:' + U.slice(0, 12) + ':' + pid, U); return json({ ok: true, given: got, bd: badges(U) }); }
       if (op === 'rrget') { const fids = [...new Set((Array.isArray(b.fids) ? b.fids : []).map(x => clean(x, 20)))].filter(x => /^[A-Za-z0-9-]{2,20}$/.test(x)).slice(0, 12), o = {};
         fids.forEach(f => { const r = this.q('SELECT ch, count(*) AS n, max(t) AS t FROM rrc WHERE fid=? GROUP BY ch ORDER BY n DESC, t DESC LIMIT 1', f)[0]; if (r) o[f] = { ch: r.ch, n: r.n, t: r.t, mine: (this.q('SELECT ch FROM rrc WHERE fid=? AND u=?', f, U)[0] || {}).ch || '' }; });
         return json({ c: o }); }
