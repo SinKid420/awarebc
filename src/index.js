@@ -214,10 +214,10 @@ export default {
 const HOUR = 3600000, DAY = 24 * HOUR, ONLINE = 5 * 60000, SPOT_AGE = 6 * HOUR;
 const RL_DAYS = 14, MSG_DAYS = 30, IDLE_DAYS = 365, FLAG_DAYS = 90, MUTE = 7 * DAY, MAX_FRIENDS = 500, MAX_GROUPS = 50;
 const WHY = ['spam', 'harass', 'scam', 'unsafe', 'other'];
-// plain profile badges a rider picks for themselves (up to 5), shown after the badges they earned
+// plain profile badges a rider picks for themselves (up to 10), shown after the badges they earned
 const SKL = ['aid', 'rec'];
 const PF = ['yr', 'rig', 'lift', 'tire', 'winch', 'arm', 'home', 'radio'];
-const PB = ['overland', 'camp', 'fish', 'hunt', 'sled', 'dirt', 'sxs', '4x4', 'photo', 'ham', 'aid', 'dog', 'log', 'ranch', 'local', 'hike', 'mtb', 'paddle', 'ski', 'atv', 'gear', 'weld', 'haul', 'gold', 'shroom', 'stars', 'bird', 'shoe', 'cook', 'nav'];
+const PB = ['overland', 'camp', 'fish', 'hunt', 'sled', 'dirt', 'sxs', '4x4', 'photo', 'ham', 'aid', 'dog', 'log', 'ranch', 'local', 'hike', 'mtb', 'paddle', 'ski', 'atv', 'gear', 'shoe', 'strap', 'sat', 'saw', 'fuel', 'air', 'jump', 'ext', 'ava', 'bear', 'h2o', 'wfa'];
 const ID = /^[0-9a-f]{24}$/, GID = /^[a-z0-9]{8,20}$/;
 const dmId = (a, b) => 'd:' + [a, b].sort().join(':');
 const RESERVED = /\b(admin|administrator|moderator|mod|awarebc|aware bc|support|staff|official|founder|creator|developer)\b|josh\W*singer/i;
@@ -548,7 +548,7 @@ export class Hub {
           if (b[k]) { const m = media(b[k], max, JP); if (!m || m.v[0] !== 0xff || m.v[1] !== 0xd8) return err('Photo not accepted'); id = rid() + rid(); this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', id, m.ty, m.v, now); }
           if (old[k]) this.sql.exec('DELETE FROM rlm WHERE id=?', old[k]); this.sql.exec('UPDATE rlpf SET ' + k + '=? WHERE u=?', id, U); }
         return json({ ok: true, pf: pfOf(U) }); }
-      if (op === 'pb') { const pb = [...new Set((Array.isArray(b.pb) ? b.pb : []).map(String))].filter(x => PB.includes(x)).slice(0, 5); this.sql.exec('UPDATE riders SET pb=? WHERE u=?', pb.join(','), U); return json({ ok: true, pb }); }
+      if (op === 'pb') { const pb = [...new Set((Array.isArray(b.pb) ? b.pb : []).map(String))].filter(x => PB.includes(x)).slice(0, 10); this.sql.exec('UPDATE riders SET pb=? WHERE u=?', pb.join(','), U); return json({ ok: true, pb }); }
       if (op === 'prof') { const tg = clean(b.tg, 6).toUpperCase(); const rr = !tg || tg === me.t ? { u: U, n: name, t: me.t } : this.q('SELECT u, n, t FROM riders WHERE t=?', tg)[0]; if (!rr) return err('Rider not found', 404);
         const lastRig = this.q("SELECT rig, tags FROM rlp WHERE u=? AND kind='r' AND hid=0 AND k='' ORDER BY t DESC LIMIT 1", rr.u)[0];
         const pbr = this.q('SELECT pb FROM riders WHERE u=?', rr.u)[0];
