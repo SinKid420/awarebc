@@ -126,6 +126,12 @@ if (t.hostname === 'www.env.gov.bc.ca') {
 if (!t.search && /^\/wsd\/data_searches\/snow\/asws\/data\/(SD|TA)\.csv$/.test(t.pathname)) return { url: t.toString(), fresh: 1800, stale: 43200, accept: 'text/csv,*/*' };
 return null;
 }
+if (t.hostname === 'geogratis.gc.ca' && t.pathname === '/services/geoname/en/geonames.json') { // Canadian Geographical Names (search)
+const p = t.searchParams, keys = [...p.keys()].sort().join(','); if (keys !== 'num,q') return null; const q = p.get('q') || '';
+if (q.length < 2 || q.length > 60 || /[<>{}\\]/.test(q) || !/^([1-9]|[1-4]\d|50)$/.test(p.get('num') || '')) return null;
+const u = new URL('https://geogratis.gc.ca/services/geoname/en/geonames.json'); u.searchParams.set('q', q); u.searchParams.set('num', p.get('num'));
+return { url: u.toString(), fresh: 86400, stale: 604800 };
+}
 if (t.hostname === 'api.gdeltproject.org' && t.pathname === '/api/v2/doc/doc') {
 const p = t.searchParams, keys = [...p.keys()].sort().join(',');
 if (keys !== 'format,maxrecords,mode,query,sort,timespan') return null;
