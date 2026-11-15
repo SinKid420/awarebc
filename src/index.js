@@ -217,7 +217,7 @@ const WHY = ['spam', 'harass', 'scam', 'unsafe', 'other'];
 // plain profile badges a rider picks for themselves (up to 5), shown after the badges they earned
 const SKL = ['aid', 'rec'];
 const PF = ['yr', 'rig', 'lift', 'tire', 'winch', 'arm', 'home', 'radio'];
-const PB = ['overland', 'camp', 'fish', 'hunt', 'sled', 'dirt', 'sxs', '4x4', 'photo', 'ham', 'aid', 'dog', 'log', 'ranch', 'local'];
+const PB = ['overland', 'camp', 'fish', 'hunt', 'sled', 'dirt', 'sxs', '4x4', 'photo', 'ham', 'aid', 'dog', 'log', 'ranch', 'local', 'hike', 'mtb', 'paddle', 'ski', 'atv', 'gear', 'weld', 'haul', 'gold', 'shroom', 'stars', 'bird', 'shoe', 'cook', 'nav'];
 const ID = /^[0-9a-f]{24}$/, GID = /^[a-z0-9]{8,20}$/;
 const dmId = (a, b) => 'd:' + [a, b].sort().join(':');
 const RESERVED = /\b(admin|administrator|moderator|mod|awarebc|aware bc|support|staff|official|founder|creator|developer)\b|josh\W*singer/i;
