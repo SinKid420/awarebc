@@ -215,6 +215,8 @@ const HOUR = 3600000, DAY = 24 * HOUR, ONLINE = 5 * 60000, SPOT_AGE = 6 * HOUR;
 const RL_DAYS = 14, MSG_DAYS = 30, IDLE_DAYS = 365, FLAG_DAYS = 90, MUTE = 7 * DAY, MAX_FRIENDS = 500, MAX_GROUPS = 50;
 const WHY = ['spam', 'harass', 'scam', 'unsafe', 'other'];
 // plain profile badges a rider picks for themselves (up to 5), shown after the badges they earned
+const SKL = ['aid', 'rec'];
+const PF = ['yr', 'rig', 'lift', 'tire', 'winch', 'arm', 'home', 'radio'];
 const PB = ['overland', 'camp', 'fish', 'hunt', 'sled', 'dirt', 'sxs', '4x4', 'photo', 'ham', 'aid', 'dog', 'log', 'ranch', 'local'];
 const ID = /^[0-9a-f]{24}$/, GID = /^[a-z0-9]{8,20}$/;
 const dmId = (a, b) => 'd:' + [a, b].sort().join(':');
@@ -252,7 +254,8 @@ export class Hub {
       CREATE TABLE IF NOT EXISTS rlm (id TEXT PRIMARY KEY, ty TEXT, v BLOB, t INTEGER);
       CREATE TABLE IF NOT EXISTS rlb (u TEXT, b TEXT, n INTEGER, PRIMARY KEY (u, b));
       CREATE TABLE IF NOT EXISTS rln (u TEXT PRIMARY KEY, by TEXT, tg TEXT, rig TEXT, lat REAL, lon REAL, at INTEGER);
-      CREATE TABLE IF NOT EXISTS rlba (ref TEXT PRIMARY KEY, u TEXT, b TEXT, by TEXT, t INTEGER);`);
+      CREATE TABLE IF NOT EXISTS rlba (ref TEXT PRIMARY KEY, u TEXT, b TEXT, by TEXT, t INTEGER);
+      CREATE TABLE IF NOT EXISTS rlpf (u TEXT PRIMARY KEY, yr TEXT, rig TEXT, lift TEXT, tire TEXT, winch TEXT, arm TEXT, bio TEXT, home TEXT, radio TEXT, sk TEXT, cv INTEGER DEFAULT 0, cov TEXT, av TEXT, km REAL DEFAULT 0, trips INTEGER DEFAULT 0, ll REAL, lo REAL, la INTEGER DEFAULT 0, t INTEGER);`);
     for (const c of ['mid TEXT', 'rb TEXT', 'rbu TEXT', 'cb TEXT', 'cbn TEXT', 'cfm INTEGER DEFAULT 0']) try { this.sql.exec('ALTER TABLE rlp ADD COLUMN ' + c); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rln ADD COLUMN ex INTEGER DEFAULT 0'); } catch (e) {}
     for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT', 'pk TEXT', 'pb TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
@@ -284,6 +287,7 @@ export class Hub {
     this.sql.exec("DELETE FROM msgs WHERE u=? OR chat LIKE ? OR chat LIKE ?", u, 'd:' + u + ':%', 'd:%:' + u);
     this.q('SELECT g FROM gm WHERE u=?', u).forEach(r => this.leave(r.g, u));
     this.q('SELECT id FROM rlp WHERE u=?', u).forEach(r => this.rlDel(r.id)); this.sql.exec('DELETE FROM rlc WHERE u=?', u); this.sql.exec('DELETE FROM rlg WHERE u=?', u); this.sql.exec('DELETE FROM rlr WHERE u=?', u);
+    { const f = this.q('SELECT cov, av FROM rlpf WHERE u=?', u)[0]; if (f) [f.cov, f.av].forEach(m => { if (m) this.sql.exec('DELETE FROM rlm WHERE id=?', m); }); this.sql.exec('DELETE FROM rlpf WHERE u=?', u); }
     this.sql.exec('DELETE FROM riders WHERE u=?', u);
   }
   rlDel(id) { const r = this.q('SELECT img, au FROM rlp WHERE id=?', id)[0]; if (!r) return; [r.img, r.au, r.img ? r.img + 't' : ''].forEach(m => { if (m) this.sql.exec('DELETE FROM rlm WHERE id=?', m); });
@@ -497,8 +501,15 @@ export class Hub {
         const cm = this.q('SELECT cid, u, by, tg, x, q, ans, t FROM rlc WHERE id=? ORDER BY (q=1 AND ans=0) DESC, cid DESC LIMIT 2', r.id).map(c => { const o = Object.assign({}, c, { fd: !!this.admin(c.u) }); delete o.u; return o; });
         return { id: r.id, t: r.t, by: r.by, tg: r.tg, kind: r.kind, lat: r.lat, lon: r.lon, x: r.x, el: r.el, tc: r.tc, st: r.st, rig: r.rig, tags: JSON.parse(r.tags || '[]'), parts: r.parts || '', radio: r.radio || '',
           img: r.img || '', au: r.au || '', aud: r.aud || 0, likes: r.likes, ver: r.ver, nc: r.nc, me: r.u === U, liked: mine.includes('l'), verd: mine.includes('v'), cm,
-          rb: r.rb || '', uc: !!(r.rb && !r.u), cb: r.cbn || '', cbme: !!r.cb && r.cb === U, cfm: r.cfm || 0, cfmd: mine.includes('k'), bd: badges(r.u), fd: !!(r.u && this.admin(r.u)) }; };
+          rb: r.rb || '', uc: !!(r.rb && !r.u), cb: r.cbn || '', cbme: !!r.cb && r.cb === U, cfm: r.cfm || 0, cfmd: mine.includes('k'), bd: badges(r.u), av: avOf(r.u), hl: r.kind === 'h' ? helpers(r.lat, r.lon) : undefined, fd: !!(r.u && this.admin(r.u)) }; };
       // ---- badges: Recovery, Sawyer, Scout, Wrench, Relay (Bronze 3 · Silver 10 · Gold 25) ----
+      const pfOf = u => { const f = u && this.q('SELECT * FROM rlpf WHERE u=?', u)[0]; if (!f) return null;
+        return { yr: f.yr || '', rig: f.rig || '', lift: f.lift || '', tire: f.tire || '', winch: f.winch || '', arm: f.arm || '', bio: f.bio || '', home: f.home || '', radio: f.radio || '',
+          sk: String(f.sk || '').split(',').filter(x => SKL.includes(x)), cv: !!f.cv, cov: f.cov || '', av: f.av || '', km: Math.round(f.km || 0), trips: f.trips || 0 }; };
+      const avOf = u => { const f = u && this.q('SELECT av FROM rlpf WHERE u=?', u)[0]; return f && f.av || ''; };
+      // help calls: how many riders seen nearby in the last 15 min have first aid or recovery gear
+      const helpers = (lat, lon) => { const rows = this.q("SELECT f.sk FROM rln n JOIN rlpf f ON f.u=n.u WHERE n.u<>? AND n.at>? AND n.lat BETWEEN ? AND ? AND n.lon BETWEEN ? AND ? AND f.sk<>''", U, now - 15 * 60000, lat - 0.6, lat + 0.6, lon - 0.9, lon + 0.9);
+        return { aid: rows.filter(r => /\baid\b/.test(r.sk)).length, rec: rows.filter(r => /\brec\b/.test(r.sk)).length }; };
       const BDG = ['recovery', 'sawyer', 'scout', 'wrench', 'relay'], bcache = {};
       const badges = u => { if (!u) return {}; if (bcache[u]) return bcache[u]; const o = {}; this.q('SELECT b, n FROM rlb WHERE u=?', u).forEach(x => { o[x.b] = x.n; }); return bcache[u] = o; };
       const award = (u, bd, ref, by) => { if (!u || !BDG.includes(bd) || this.q('SELECT 1 FROM rlba WHERE ref=?', ref).length) return false; this.sql.exec('INSERT INTO rlba (ref, u, b, by, t) VALUES (?, ?, ?, ?, ?)', ref, u, bd, by || '', now);
@@ -516,16 +527,32 @@ export class Hub {
         const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (lat == null || lon == null) return err('No spot');
         if (!b.share) { this.sql.exec('DELETE FROM rln WHERE u=?', U); return json({ r: [] }); }
         if (this.lim('nr' + U, 120, HOUR)) return err('Slow down', 429);
+        { const f = this.q('SELECT ll, lo, la FROM rlpf WHERE u=?', U)[0]; if (!f) this.sql.exec('INSERT OR IGNORE INTO rlpf (u, t) VALUES (?, ?)', U, now);
+          const gap = f && f.la ? now - f.la : Infinity; let add = 0, trip = gap > 6 * HOUR ? 1 : 0;
+          if (f && f.la && gap < 30 * 60000) { const r = Math.PI / 180, d = 6371 * 2 * Math.asin(Math.sqrt(Math.sin((lat - f.ll) * r / 2) ** 2 + Math.cos(lat * r) * Math.cos(f.ll * r) * Math.sin((lon - f.lo) * r / 2) ** 2)); if (d > 0.05 && d < gap / 60000 * 2.5) add = d; } // ignore GPS jitter and jumps
+          if (gap > 50000 || add) this.sql.exec('UPDATE rlpf SET km=km+?, trips=trips+?, ll=?, lo=?, la=? WHERE u=?', add, trip, lat, lon, now, U); }
         const ex = b.ex ? 1 : 0; // exact spot, or rounded to about 1 km
         this.sql.exec('INSERT OR REPLACE INTO rln (u, by, tg, rig, lat, lon, at, ex) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', U, isAdmin ? 'Josh Singer' : name, me.t, clean(b.rig, 40), ex ? +lat.toFixed(5) : Math.round(lat * 100) / 100, ex ? +lon.toFixed(5) : Math.round(lon * 100) / 100, now, ex);
-        const r = this.q('SELECT u, by, tg, rig, lat, lon, at, ex FROM rln WHERE u<>? AND at>? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? ORDER BY at DESC LIMIT 60', U, now - 15 * 60000, lat - 0.6, lat + 0.6, lon - 0.9, lon + 0.9);
+        const r = this.q('SELECT n.u, n.by, n.tg, n.rig, n.lat, n.lon, n.at, n.ex, f.cv, f.av FROM rln n LEFT JOIN rlpf f ON f.u=n.u WHERE n.u<>? AND at>? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? ORDER BY at DESC LIMIT 60', U, now - 15 * 60000, lat - 0.6, lat + 0.6, lon - 0.9, lon + 0.9);
         const bl = new Set(this.q('SELECT b FROM blocks WHERE a=?', U).map(x => x.b).concat(this.q('SELECT a FROM blocks WHERE b=?', U).map(x => x.a)));
-        return json({ r: r.filter(x => !bl.has(x.u)).map(x => ({ by: x.by, tg: x.tg, rig: x.rig, lat: x.lat, lon: x.lon, at: x.at, ex: !!x.ex, fd: !!this.admin(x.u) })) }); }
+        return json({ r: r.filter(x => !bl.has(x.u)).map(x => ({ by: x.by, tg: x.tg, rig: x.rig, lat: x.lat, lon: x.lon, at: x.at, ex: !!x.ex, cv: !!x.cv, av: x.av || '', fd: !!this.admin(x.u) })) }); }
+      if (op === 'pf') { // rider profile: rig bio, cover and profile photos, home area, radio, skills, open to convoy
+        if (this.lim('pf' + U, 40, DAY)) return err('That\'s a lot of profile changes today.', 429);
+        this.sql.exec('INSERT OR IGNORE INTO rlpf (u, t) VALUES (?, ?)', U, now); const old = this.q('SELECT cov, av FROM rlpf WHERE u=?', U)[0];
+        const v = {}; PF.forEach(k => { v[k] = clean(b[k], k === 'home' ? 40 : k === 'rig' ? 40 : 24); }); v.bio = clean(b.bio, 160);
+        const sk = [...new Set((Array.isArray(b.sk) ? b.sk : []).map(String))].filter(x => SKL.includes(x)).join(',');
+        this.sql.exec('UPDATE rlpf SET yr=?, rig=?, lift=?, tire=?, winch=?, arm=?, home=?, radio=?, bio=?, sk=?, cv=?, t=? WHERE u=?', v.yr, v.rig, v.lift, v.tire, v.winch, v.arm, v.home, v.radio, v.bio, sk, b.cv ? 1 : 0, now, U);
+        for (const [k, max] of [['cov', 330000], ['av', 70000]]) {
+          if (b[k] === undefined) continue;
+          let id = '';
+          if (b[k]) { const m = media(b[k], max, JP); if (!m || m.v[0] !== 0xff || m.v[1] !== 0xd8) return err('Photo not accepted'); id = rid() + rid(); this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', id, m.ty, m.v, now); }
+          if (old[k]) this.sql.exec('DELETE FROM rlm WHERE id=?', old[k]); this.sql.exec('UPDATE rlpf SET ' + k + '=? WHERE u=?', id, U); }
+        return json({ ok: true, pf: pfOf(U) }); }
       if (op === 'pb') { const pb = [...new Set((Array.isArray(b.pb) ? b.pb : []).map(String))].filter(x => PB.includes(x)).slice(0, 5); this.sql.exec('UPDATE riders SET pb=? WHERE u=?', pb.join(','), U); return json({ ok: true, pb }); }
       if (op === 'prof') { const tg = clean(b.tg, 6).toUpperCase(); const rr = !tg || tg === me.t ? { u: U, n: name, t: me.t } : this.q('SELECT u, n, t FROM riders WHERE t=?', tg)[0]; if (!rr) return err('Rider not found', 404);
         const lastRig = this.q("SELECT rig, tags FROM rlp WHERE u=? AND kind='r' AND hid=0 AND k='' ORDER BY t DESC LIMIT 1", rr.u)[0];
         const pbr = this.q('SELECT pb FROM riders WHERE u=?', rr.u)[0];
-        return json({ pb: String(pbr && pbr.pb || '').split(',').filter(x => PB.includes(x)), n: this.admin(rr.u) ? 'Josh Singer' : rr.u === U ? name : rr.n, t: rr.t, me: rr.u === U, fd: !!this.admin(rr.u), bd: badges(rr.u), posts: this.q('SELECT count(*) AS c FROM rlp WHERE u=? AND hid=0', rr.u)[0].c, rig: lastRig ? lastRig.rig : '', tags: lastRig ? JSON.parse(lastRig.tags || '[]') : [] }); }
+        return json({ pf: pfOf(rr.u), pb: String(pbr && pbr.pb || '').split(',').filter(x => PB.includes(x)), n: this.admin(rr.u) ? 'Josh Singer' : rr.u === U ? name : rr.n, t: rr.t, me: rr.u === U, fd: !!this.admin(rr.u), bd: badges(rr.u), posts: this.q('SELECT count(*) AS c FROM rlp WHERE u=? AND hid=0', rr.u)[0].c, rig: lastRig ? lastRig.rig : '', tags: lastRig ? JSON.parse(lastRig.tags || '[]') : [] }); }
       if (op === 'relay') { // a post carried phone to phone through a dead zone, uploaded by the first phone with signal (public posts only)
         if (key) return err('Convoy posts are not relayed'); const mid = clean(b.mid, 24), tg = clean(b.tg, 6).toUpperCase(), lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180), kind = ['c', 'h'].includes(b.kind) ? b.kind : null;
         if (!/^[a-z0-9]{8,24}$/.test(mid) || !/^[A-Z0-9]{4}$/.test(tg) || lat == null || lon == null || !kind) return err('bad relay');
