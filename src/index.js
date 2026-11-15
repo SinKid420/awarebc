@@ -5,7 +5,8 @@
 // - Rider tags: each phone keeps a secret key; the server keeps only its fingerprint and shows a short tag (e.g. Boss #4K7Q) that can't be copied.
 // - Danger reports (Caution / Blocked) need the poster, or 2 different riders, to clear them.  - 3+ reports earns a "trusted" tick.
 // - Friends: add by rider tag, see accepted friends' spots (only while they share), chat 1-to-1 and in groups (class Hub below).
-import relay from './relay.js'; // flight relay (was the separate skyrelay server)
+import relay from './relay.js';
+import { makeVapid, send as wpSend, PUSH_HOSTS } from './push.js'; // flight relay (was the separate skyrelay server)
 const ORIGIN = 'https://sinkid420.github.io';
 const MAX = 1000; // newest 1000 reports are kept
 const WEEK = 7 * 86400000; // cleared reports stay this long
@@ -255,11 +256,14 @@ export class Hub {
       CREATE TABLE IF NOT EXISTS rlb (u TEXT, b TEXT, n INTEGER, PRIMARY KEY (u, b));
       CREATE TABLE IF NOT EXISTS rln (u TEXT PRIMARY KEY, by TEXT, tg TEXT, rig TEXT, lat REAL, lon REAL, at INTEGER);
       CREATE TABLE IF NOT EXISTS rlba (ref TEXT PRIMARY KEY, u TEXT, b TEXT, by TEXT, t INTEGER);
+      CREATE TABLE IF NOT EXISTS psub (ep TEXT PRIMARY KEY, u TEXT, p256dh TEXT, auth TEXT, t INTEGER);
+      CREATE INDEX IF NOT EXISTS psub_u ON psub(u);
       CREATE TABLE IF NOT EXISTS chk (u TEXT PRIMARY KEY, id TEXT, due INTEGER, note TEXT, ids TEXT, lat REAL, lon REAL, at INTEGER, done INTEGER DEFAULT 0, t INTEGER);
       CREATE TABLE IF NOT EXISTS rrc (fid TEXT, u TEXT, ch TEXT, nm TEXT, t INTEGER, PRIMARY KEY (fid, u));
       CREATE TABLE IF NOT EXISTS rlpf (u TEXT PRIMARY KEY, yr TEXT, rig TEXT, lift TEXT, tire TEXT, winch TEXT, arm TEXT, bio TEXT, home TEXT, radio TEXT, sk TEXT, cv INTEGER DEFAULT 0, cov TEXT, av TEXT, km REAL DEFAULT 0, trips INTEGER DEFAULT 0, ll REAL, lo REAL, la INTEGER DEFAULT 0, t INTEGER);`);
     for (const c of ['mid TEXT', 'rb TEXT', 'rbu TEXT', 'cb TEXT', 'cbn TEXT', 'cfm INTEGER DEFAULT 0']) try { this.sql.exec('ALTER TABLE rlp ADD COLUMN ' + c); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rln ADD COLUMN ex INTEGER DEFAULT 0'); } catch (e) {}
+    try { this.sql.exec('ALTER TABLE chk ADD COLUMN pushed INTEGER DEFAULT 0'); } catch (e) {}
     for (const c of ['until INTEGER DEFAULT 0', 'mute INTEGER DEFAULT 0', 'ih TEXT', 'pk TEXT', 'pb TEXT']) try { this.sql.exec('ALTER TABLE riders ADD COLUMN ' + c); } catch (e) {}
     try { this.sql.exec('ALTER TABLE msgs ADD COLUMN e TEXT'); } catch (e) {} // end-to-end locked message (only chat members can open it)
     try { state.storage.getAlarm().then(a => { if (!a) state.storage.setAlarm(Date.now() + DAY); }).catch(() => {}); } catch (e) {}
@@ -290,7 +294,7 @@ export class Hub {
     this.q('SELECT g FROM gm WHERE u=?', u).forEach(r => this.leave(r.g, u));
     this.q('SELECT id FROM rlp WHERE u=?', u).forEach(r => this.rlDel(r.id)); this.sql.exec('DELETE FROM rlc WHERE u=?', u); this.sql.exec('DELETE FROM rlg WHERE u=?', u); this.sql.exec('DELETE FROM rlr WHERE u=?', u);
     { const f = this.q('SELECT cov, av FROM rlpf WHERE u=?', u)[0]; if (f) [f.cov, f.av].forEach(m => { if (m) this.sql.exec('DELETE FROM rlm WHERE id=?', m); }); this.sql.exec('DELETE FROM rlpf WHERE u=?', u); }
-    this.sql.exec('DELETE FROM chk WHERE u=?', u); this.sql.exec('DELETE FROM rrc WHERE u=?', u);
+    this.sql.exec('DELETE FROM chk WHERE u=?', u); this.sql.exec('DELETE FROM rrc WHERE u=?', u); this.sql.exec('DELETE FROM psub WHERE u=?', u);
     this.sql.exec('DELETE FROM riders WHERE u=?', u);
   }
   rlDel(id) { const r = this.q('SELECT img, au FROM rlp WHERE id=?', id)[0]; if (!r) return; [r.img, r.au, r.img ? r.img + 't' : ''].forEach(m => { if (m) this.sql.exec('DELETE FROM rlm WHERE id=?', m); });
@@ -302,8 +306,25 @@ export class Hub {
     else this.sql.exec('UPDATE groups SET owner=? WHERE g=? AND owner=?', left[0].u, g, u); // owner left: next member takes over
   }
   // every day: old messages, riders gone a year, old reports and ended mutes are cleaned away
+  // ---------- push alerts (works when AwareBC is closed, on phones that turned alerts on) ----------
+  async vapid() { if (this._vk) return this._vk; let r = this.q("SELECT v FROM meta WHERE k='vapid'")[0];
+    if (!r) { const v = await makeVapid(); this.sql.exec("INSERT OR IGNORE INTO meta (k, v) VALUES ('vapid', ?)", JSON.stringify(v)); r = this.q("SELECT v FROM meta WHERE k='vapid'")[0]; }
+    return this._vk = JSON.parse(typeof r.v === 'string' ? r.v : new TextDecoder().decode(new Uint8Array(r.v))); }
+  notify(u, msg) { const subs = this.q('SELECT ep, p256dh, auth FROM psub WHERE u=? LIMIT 5', u); if (!subs.length) return;
+    const job = this.vapid().then(vk => Promise.all(subs.map(sb => wpSend(sb, msg, vk.jwk, vk.pub, this.env.PUSHFETCH).then(st => { if (st === 404 || st === 410) this.sql.exec('DELETE FROM psub WHERE ep=?', sb.ep); }).catch(() => {})))).catch(() => {});
+    try { this.state.waitUntil(job); } catch (e) {} return job; }
+  async wake(at) { try { const a = await this.state.storage.getAlarm(); if (!a || a > at) await this.state.storage.setAlarm(at); } catch (e) {} }
+  async overdue(now) { // "Back by" timers that ran out: tell the friends that were picked
+    const due = this.q("SELECT c.u, c.id, c.due, c.ids, r.n, r.t FROM chk c JOIN riders r ON r.u=c.u WHERE c.done=0 AND c.pushed=0 AND c.due<=?", now);
+    for (const c of due) { this.sql.exec('UPDATE chk SET pushed=1 WHERE u=? AND id=?', c.u, c.id);
+      String(c.ids || '').split(',').filter(o => ID.test(o) && this.friend(o, c.u)).forEach(o => this.notify(o, { title: '⚠️ ' + c.n + ' hasn\'t checked in', body: 'Was due back ' + new Date(c.due).toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Vancouver' }) + '. Open AwareBC to see their last spot.', tag: 'od' + c.id, url: './?open=overdue', urg: 'high', ttl: 172800 })); }
+    const nx = this.q('SELECT min(due) AS d FROM chk WHERE done=0 AND pushed=0 AND due>?', now)[0]; return nx && nx.d ? nx.d + 15000 : 0; }
   async alarm() {
-    const now = Date.now();
+    const now = Date.now(); let next = 0;
+    try { next = await this.overdue(now); } catch (e) {}
+    const last = +((this.q("SELECT v FROM meta WHERE k='clean'")[0] || {}).v || 0);
+    if (now - last < 23 * HOUR) { await this.state.storage.setAlarm(Math.min(last + DAY, next || Infinity)); return; }
+    this.sql.exec("INSERT OR REPLACE INTO meta (k, v) VALUES ('clean', ?)", String(now));
     try {
       this.sql.exec('DELETE FROM msgs WHERE t<?', now - MSG_DAYS * DAY);
       { const old = this.q('SELECT id FROM rlp WHERE t<? LIMIT 2000', now - RL_DAYS * DAY).map(r => r.id); old.forEach(id => this.rlDel(id)); }
@@ -312,7 +333,7 @@ export class Hub {
       this.sql.exec('UPDATE riders SET share=0, lat=NULL, lon=NULL WHERE share=1 AND ((until>0 AND until<?) OR at<?)', now, now - SPOT_AGE);
       this.sql.exec('UPDATE riders SET mute=0 WHERE mute>0 AND mute<?', now);
       this.q('SELECT u FROM riders WHERE seen<? LIMIT 500', now - IDLE_DAYS * DAY).forEach(r => this.wipe(r.u));
-    } finally { await this.state.storage.setAlarm(now + DAY); }
+    } finally { await this.state.storage.setAlarm(Math.min(now + DAY, next || Infinity)); }
   }
   async fetch(req) {
     const iu = new URL(req.url);
@@ -401,6 +422,7 @@ export class Hub {
       if (this.q("SELECT 1 FROM friends WHERE a=? AND b=? AND st='p'", o, U).length) { this.sql.exec("DELETE FROM friends WHERE a=? AND b=?", o, U); this.sql.exec("INSERT OR REPLACE INTO friends VALUES (?, ?, 'f', ?), (?, ?, 'f', ?)", U, o, now, o, U, now); return json({ ok: true, msg: 'You are now friends with ' + c[0].n + '.' }); }
       if (this.q("SELECT count(*) AS c FROM friends WHERE b=? AND st='p'", o)[0].c >= 50) return json(sentMsg); // their inbox is full: quietly drop
       this.sql.exec("INSERT OR IGNORE INTO friends VALUES (?, ?, 'p', ?)", U, o, now);
+      this.notify(o, { title: '👋 ' + name + ' #' + me.t, body: 'wants to be friends on AwareBC. Open Friends to accept.', tag: 'fr' + U.slice(0, 8), url: './?open=friends', urg: 'normal' });
       return json(sentMsg);
     }
     if (p === 'answer') {
@@ -432,15 +454,22 @@ export class Hub {
       if (b.block) { this.sql.exec('INSERT OR IGNORE INTO blocks VALUES (?, ?, ?)', U, o, now); this.unfriend(U, o); }
       return json({ ok: true });
     }
+    if (p === 'pkey') return json({ k: (await this.vapid()).pub });
+    if (p === 'psub') { const ep = String(b.ep || '').slice(0, 800); let h = ''; try { const pu = new URL(ep); h = pu.protocol === 'https:' ? pu.hostname : ''; } catch (e) {}
+      if (!PUSH_HOSTS.test(h) || !/^[A-Za-z0-9_-]{80,100}$/.test(String(b.p256dh || '')) || !/^[A-Za-z0-9_-]{20,24}$/.test(String(b.auth || ''))) return err('That alert subscription was not accepted.');
+      if (this.q('SELECT count(*) AS c FROM psub WHERE u=?', U)[0].c >= 5) this.sql.exec('DELETE FROM psub WHERE ep IN (SELECT ep FROM psub WHERE u=? ORDER BY t LIMIT 1)', U);
+      this.sql.exec('INSERT OR REPLACE INTO psub (ep, u, p256dh, auth, t) VALUES (?, ?, ?, ?, ?)', ep, U, b.p256dh, b.auth, now); return json({ ok: true }); }
+    if (p === 'punsub') { this.sql.exec('DELETE FROM psub WHERE ep=? AND u=?', String(b.ep || ''), U); return json({ ok: true }); }
+    if (p === 'ptest') { if (this.lim('pt' + U, 5, HOUR)) return err('Too many tests.', 429); this.notify(U, { title: 'AwareBC alerts are on ✅', body: 'You\'ll get overdue check-ins, friend requests and messages here.', tag: 'test', url: './' }); return json({ ok: true }); }
     if (p === 'chk') { // "Back by" check-in (Off-road): set, extend, update last spot, I'm back
       const op = String(b.op || ''), lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180), spot = lat != null && lon != null;
       if (op === 'set') { if (this.lim('ck' + U, 30, DAY)) return err('Too many check-ins today.', 429); const due = num(b.due, now + 10 * 60000, now + 72 * HOUR); if (due == null) return err('Pick a time between 10 minutes and 3 days from now.');
         const ids = [...new Set((Array.isArray(b.ids) ? b.ids : []).map(String))].filter(o => ID.test(o) && this.friend(U, o)).slice(0, 10); if (!ids.length) return err('Pick at least one friend to tell.');
         const id = rid(); this.sql.exec('INSERT OR REPLACE INTO chk (u, id, due, note, ids, lat, lon, at, done, t) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)', U, id, Math.round(due), clean(b.note, 140), ids.join(','), spot ? +lat.toFixed(5) : null, spot ? +lon.toFixed(5) : null, spot ? now : 0, now);
-        return json({ ok: true, id, due: Math.round(due) }); }
+        await this.wake(Math.round(due) + 15000); return json({ ok: true, id, due: Math.round(due) }); }
       const c = this.q('SELECT id, due FROM chk WHERE u=? AND done=0', U)[0]; if (!c) return json({ ok: true, none: true });
       if (op === 'pos') { if (spot) this.sql.exec('UPDATE chk SET lat=?, lon=?, at=? WHERE u=?', +lat.toFixed(5), +lon.toFixed(5), now, U); return json({ ok: true }); }
-      if (op === 'ext') { const mins = num(b.mins, 5, 24 * 60) || 60, due = Math.min(Math.max(c.due, now) + mins * 60000, now + 72 * HOUR); this.sql.exec('UPDATE chk SET due=? WHERE u=?', due, U); return json({ ok: true, due }); }
+      if (op === 'ext') { const mins = num(b.mins, 5, 24 * 60) || 60, due = Math.min(Math.max(c.due, now) + mins * 60000, now + 72 * HOUR); this.sql.exec('UPDATE chk SET due=?, pushed=0 WHERE u=?', due, U); await this.wake(due + 15000); return json({ ok: true, due }); }
       if (op === 'done') { this.sql.exec('UPDATE chk SET done=1, t=? WHERE u=?', now, U); return json({ ok: true }); }
       return err('bad op'); }
     if (p === 'pk') { const pk = String(b.pk || ''); if (!/^[A-Za-z0-9+/]{86,88}={0,2}$/.test(pk)) return err('bad key'); this.sql.exec('UPDATE riders SET pk=? WHERE u=?', pk, U); return json({ ok: true }); }
@@ -469,6 +498,9 @@ export class Hub {
       const r = this.q('INSERT INTO msgs (chat, u, n, tg, x, e, lat, lon, t) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id', chat, U, name, me.t, x, e || null, lat == null ? null : +lat.toFixed(5), lon == null ? null : +lon.toFixed(5), now)[0];
       this.sql.exec('INSERT INTO reads (u, chat, last) VALUES (?, ?, ?) ON CONFLICT(u, chat) DO UPDATE SET last=excluded.last', U, chat, r.id);
       if (r.id % 50 === 0) this.sql.exec('DELETE FROM msgs WHERE chat=? AND id < (SELECT id FROM msgs WHERE chat=? ORDER BY id DESC LIMIT 1 OFFSET 499)', chat, chat);
+      { const to = chat[0] === 'd' ? chat.split(':').slice(1).filter(x => x !== U) : this.q('SELECT u FROM gm WHERE g=? AND u<>?', chat.slice(2), U).map(x => x.u);
+        const gname = chat[0] === 'g' ? (this.q('SELECT name FROM groups WHERE g=?', chat.slice(2))[0] || {}).name : '';
+        to.filter(o => !this.blocked(U, o) && !this.lim('pm' + o + chat, 1, 3 * 60000)).forEach(o => this.notify(o, { title: '💬 ' + name + (gname ? ' · ' + gname : ''), body: lat != null ? 'Sent a spot' : 'New message', tag: 'm' + chat.slice(-12), url: './?open=chat', urg: 'normal', ttl: 21600 })); }
       return json({ ok: true, id: r.id, t: now });
     }
     if (p === 'unsend') { this.sql.exec('DELETE FROM msgs WHERE id=? AND u=?', +b.mid || 0, U); return json({ ok: true }); }
