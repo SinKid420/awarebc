@@ -585,6 +585,7 @@ export class Hub {
           if (gap > 50000 || add) this.sql.exec('UPDATE rlpf SET km=km+?, trips=trips+?, ll=?, lo=?, la=? WHERE u=?', add, trip, lat, lon, now, U); }
         const ex = b.ex ? 1 : 0; // exact spot, or rounded to about 1 km
         this.sql.exec('INSERT OR REPLACE INTO rln (u, by, tg, rig, lat, lon, at, ex) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', U, isAdmin ? 'Josh Singer' : name, me.t, clean(b.rig, 40), ex ? +lat.toFixed(5) : Math.round(lat * 100) / 100, ex ? +lon.toFixed(5) : Math.round(lon * 100) / 100, now, ex);
+        if (b.see === 0 || b.see === '0') return json({ r: [] }); // they hid other riders on their own map: still seen, nothing to send back
         const r = this.q('SELECT n.u, n.by, n.tg, n.rig, n.lat, n.lon, n.at, n.ex, f.cv, f.av FROM rln n LEFT JOIN rlpf f ON f.u=n.u WHERE n.u<>? AND at>? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? ORDER BY at DESC LIMIT 60', U, now - 15 * 60000, lat - 0.6, lat + 0.6, lon - 0.9, lon + 0.9);
         const bl = new Set(this.q('SELECT b FROM blocks WHERE a=?', U).map(x => x.b).concat(this.q('SELECT a FROM blocks WHERE b=?', U).map(x => x.a)));
         return json({ r: r.filter(x => !bl.has(x.u)).map(x => ({ by: x.by, tg: x.tg, rig: x.rig, lat: x.lat, lon: x.lon, at: x.at, ex: !!x.ex, cv: !!x.cv, av: x.av || '', fd: !!this.admin(x.u) })) }); }
