@@ -456,6 +456,11 @@ export class Hub {
       return json({ ok: true });
     }
     if (p === 'pkey') return json({ k: (await this.vapid()).pub });
+    if (p === 'mbx') { // Mapbox satellite (test): count tiles used this month across all riders; stop at the free-tier guard so the account is never billed
+      const LIMIT = 600000, mk = 'mbx-' + new Date(now).toISOString().slice(0, 7), n = Math.max(0, Math.min(3000, b.n | 0));
+      const cur = this.q('SELECT v FROM meta WHERE k=?', mk)[0], used = cur ? +cur.v || 0 : 0;
+      if (n && !this.lim('mb' + U, 120, DAY)) this.sql.exec('INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)', mk, String(used + n));
+      const tot = used + n; return json({ on: tot < LIMIT, used: tot, limit: LIMIT }); }
     if (p === 'psub') { const ep = String(b.ep || '').slice(0, 800); let h = ''; try { const pu = new URL(ep); h = pu.protocol === 'https:' ? pu.hostname : ''; } catch (e) {}
       if (!PUSH_HOSTS.test(h) || !/^[A-Za-z0-9_-]{80,100}$/.test(String(b.p256dh || '')) || !/^[A-Za-z0-9_-]{20,24}$/.test(String(b.auth || ''))) return err('That alert subscription was not accepted.');
       if (this.q('SELECT count(*) AS c FROM psub WHERE u=?', U)[0].c >= 5) this.sql.exec('DELETE FROM psub WHERE ep IN (SELECT ep FROM psub WHERE u=? ORDER BY t LIMIT 1)', U);
