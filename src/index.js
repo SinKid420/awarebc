@@ -213,7 +213,7 @@ export default {
 // Safety: block, report (3 different riders = chat paused 7 days), unsend, group owner can remove,
 // limits per rider AND per network, spot sharing turns itself off, old data is cleaned every day.
 const HOUR = 3600000, DAY = 24 * HOUR, ONLINE = 5 * 60000, SPOT_AGE = 6 * HOUR;
-const RL_DAYS = 14, MSG_DAYS = 30, IDLE_DAYS = 365, FLAG_DAYS = 90, MUTE = 7 * DAY, MAX_FRIENDS = 500, MAX_GROUPS = 50;
+const RL_DAYS = 14, SR_DAYS = 120, MSG_DAYS = 30, IDLE_DAYS = 365, FLAG_DAYS = 90, MUTE = 7 * DAY, MAX_FRIENDS = 500, MAX_GROUPS = 50;
 const WHY = ['spam', 'harass', 'scam', 'unsafe', 'other'];
 // plain profile badges a rider picks for themselves (up to 10), shown after the badges they earned
 const SKL = ['aid', 'rec'];
@@ -330,7 +330,7 @@ export class Hub {
     this.sql.exec("INSERT OR REPLACE INTO meta (k, v) VALUES ('clean', ?)", String(now));
     try {
       this.sql.exec('DELETE FROM msgs WHERE t<?', now - MSG_DAYS * DAY);
-      { const old = this.q('SELECT id FROM rlp WHERE t<? LIMIT 2000', now - RL_DAYS * DAY).map(r => r.id); old.forEach(id => this.rlDel(id)); }
+      { const old = this.q("SELECT id FROM rlp WHERE (kind<>'s' AND t<?) OR (kind='s' AND t<?) LIMIT 2000", now - RL_DAYS * DAY, now - SR_DAYS * DAY).map(r => r.id); old.forEach(id => this.rlDel(id)); } // Showroom photos stay longer
       this.sql.exec('DELETE FROM rlg WHERE at<?', now - DAY); this.sql.exec('DELETE FROM chk WHERE due<? OR (done=1 AND t<?)', now - 3 * DAY, now - DAY); this.sql.exec('DELETE FROM rln WHERE at<?', now - HOUR);
       this.sql.exec('DELETE FROM flags WHERE t<?', now - FLAG_DAYS * DAY);
       this.sql.exec('UPDATE riders SET share=0, lat=NULL, lon=NULL WHERE share=1 AND ((until>0 AND until<?) OR at<?)', now, now - SPOT_AGE);
@@ -552,7 +552,7 @@ export class Hub {
       const key = b.key ? await keyOf(b.key) : null; if (b.key && !key) return err('Keys look like #884-BCR');
       if (key && op !== 'mkkey' && !this.q('SELECT 1 FROM rlk WHERE k=?', key.h).length) { if (this.lim('rk' + ih, 30, HOUR)) return err('Too many tries. Wait an hour.', 429); return err('No convoy with that key.', 404); }
       const kh = key ? key.h : '';
-      const post = id => { const r = this.q('SELECT * FROM rlp WHERE id=? AND hid=0', clean(id, 20))[0]; return r && r.k === kh ? r : null; };
+      const post = id => { const r = this.q('SELECT * FROM rlp WHERE id=? AND hid=0', clean(id, 20))[0]; return r && (r.k === kh || (r.kind === 's' && r.k === '')) ? r : null; };
       const media = (d, max, rx) => { const m = rx.exec(String(d || '')); if (!m || m[2].length > max * 1.37) return null; const bin = atob(m[2]), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return { ty: m[1], v: u }; };
       const JP = /^data:(image\/jpeg);base64,([A-Za-z0-9+/=]+)$/, AU = /^data:(audio\/(?:webm|ogg|mp4|aac|mpeg)(?:;codecs=[a-z0-9.]+)?);base64,([A-Za-z0-9+/=]+)$/;
       const out = r => { const mine = this.q('SELECT kind FROM rlr WHERE id=? AND u=?', r.id, U).map(x => x.kind);
@@ -634,21 +634,26 @@ export class Hub {
         return json({ ok: true, relay: false }); }
       if (op === 'feed') { const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (lat == null || lon == null) return err('No spot');
         if (b.here) this.sql.exec('INSERT OR REPLACE INTO rlg (k, u, by, tg, rig, lat, lon, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', kh, U, name, me.t, clean(b.rig, 40), key && b.share ? +lat.toFixed(5) : +lat.toFixed(2), key && b.share ? +lon.toFixed(5) : +lon.toFixed(2), b.share || !key ? now : now);
+        if (b.f === 's') { // Showroom: riders' machine photos within about 60 km, Hot (likes and comments, newer first) or New
+          const sb = [lat - 0.55, lat + 0.55, lon - 0.85, lon + 0.85]; let sp = this.q("SELECT * FROM rlp WHERE k='' AND kind='s' AND hid=0 AND t>? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? ORDER BY t DESC LIMIT 150", now - SR_DAYS * DAY, ...sb);
+          if (b.sort !== 'new') { const sc = r => ((r.likes || 0) * 2 + (r.nc || 0) * 3 + 1) / Math.pow((now - r.t) / HOUR + 2, 1.2); sp = sp.sort((a, c) => sc(c) - sc(a)); }
+          return json({ p: sp.slice(0, 60).map(out) }); }
         const box = [lat - 1.2, lat + 1.2, lon - 2, lon + 2], K = ['c', 'r', 'h'].includes(b.f) ? b.f : '';
-        const ps = this.q('SELECT * FROM rlp WHERE k=? AND hid=0 AND t>? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?' + (K ? ' AND kind=?' : '') + ' ORDER BY t DESC LIMIT 60', kh, now - RL_DAYS * DAY, ...box, ...(K ? [K] : []));
+        const ps = this.q("SELECT * FROM rlp WHERE k=? AND hid=0 AND kind<>'s' AND t>? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?" + (K ? ' AND kind=?' : '') + ' ORDER BY t DESC LIMIT 60', kh, now - RL_DAYS * DAY, ...box, ...(K ? [K] : []));
         const rigs = this.q('SELECT u, by, tg, rig, lat, lon, at FROM rlg WHERE k=? AND at>? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?', kh, now - 30 * 60000, ...box);
         return json({ p: ps.map(out), n: rigs.length, rigs: key ? rigs.filter(r => r.u !== U).map(r => ({ by: r.by, tg: r.tg, rig: r.rig, lat: r.lat, lon: r.lon, at: r.at })) : [], key: key ? key.txt : '' }); }
       if (op === 'post') { if (muted) return paused(); if (this.lim('rp' + U, isAdmin ? 300 : 25, DAY) || this.lim('rpi' + ih, 60, DAY)) return err('That\'s a lot of posts today. Try again tomorrow.', 429);
-        const kind = ['c', 'r', 'h'].includes(b.kind) ? b.kind : null, lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (!kind || lat == null || lon == null) return err('Missing spot');
+        const kind = ['c', 'r', 'h', 's'].includes(b.kind) ? b.kind : null, lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (!kind || lat == null || lon == null) return err('Missing spot');
         const mid = /^[a-z0-9]{8,24}$/.test(String(b.mid || '')) ? String(b.mid) : null; if (mid) { const d = this.q('SELECT id, u, tg, rbu FROM rlp WHERE mid=?', mid)[0]; if (d) { if (!d.u && d.tg === me.t) { this.sql.exec('UPDATE rlp SET u=?, by=? WHERE id=?', U, isAdmin ? 'Josh Singer' : name, d.id); if (d.rbu && d.rbu !== U) award(d.rbu, 'relay', 'y:' + mid, U); } return json({ ok: true, dup: true }); } }
-        const x = clean(b.x, 500), hide = !!b.hide, id = rid(); let img = '', au = '';
+        const x = clean(b.x, 500), hide = !!b.hide || kind === 's', id = rid(); /* Showroom photos only keep a rough spot (about 1 km) */ let img = '', au = '';
         if (b.img) { const m = media(b.img, 320000, JP); if (!m || m.v[0] !== 0xff || m.v[1] !== 0xd8) return err('Photo not accepted'); img = rid() + rid(); this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', img, m.ty, m.v, now);
           const th = b.th ? media(b.th, 40000, JP) : null; if (th) this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', img + 't', th.ty, th.v, now); }
         if (b.au) { const m = media(b.au, 260000, AU); if (!m) return err('Voice clip not accepted'); au = rid() + rid(); this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', au, m.ty.split(';')[0], m.v, now); }
         if (!x && !img && !au && !clean(b.st, 20) && !(kind === 'r' && clean(b.rig, 40))) return err('Add a photo, a voice clip or some words.');
+        if (kind === 's' && !img) return err('Add a photo of your machine.');
         const tags = (Array.isArray(b.tags) ? b.tags : []).map(t => clean(t, 24)).filter(Boolean).slice(0, 8);
         this.sql.exec('INSERT INTO rlp (id, t, u, by, tg, k, kind, lat, lon, x, el, tc, st, rig, tags, parts, radio, img, au, aud) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          id, now, U, isAdmin ? 'Josh Singer' : name, me.t, kh, kind, hide ? +lat.toFixed(2) : +lat.toFixed(5), hide ? +lon.toFixed(2) : +lon.toFixed(5), x, num(b.el, -500, 9000) != null ? Math.round(b.el) : null, num(b.tc, -60, 60),
+          id, now, U, isAdmin ? 'Josh Singer' : name, me.t, kind === 's' ? '' : kh, kind, hide ? +lat.toFixed(2) : +lat.toFixed(5), hide ? +lon.toFixed(2) : +lon.toFixed(5), x, num(b.el, -500, 9000) != null ? Math.round(b.el) : null, num(b.tc, -60, 60),
           clean(b.st, 20), clean(b.rig, 40), JSON.stringify(tags), clean(b.parts, 1200), clean(b.radio, 40), img, au, num(b.aud, 0, 60) || 0);
         if (mid) this.sql.exec('UPDATE rlp SET mid=? WHERE id=?', mid, id);
         return json({ ok: true, p: out(this.q('SELECT * FROM rlp WHERE id=?', id)[0]) }); }
