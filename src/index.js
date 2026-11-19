@@ -262,7 +262,7 @@ export class Hub {
       CREATE TABLE IF NOT EXISTS chk (u TEXT PRIMARY KEY, id TEXT, due INTEGER, note TEXT, ids TEXT, lat REAL, lon REAL, at INTEGER, done INTEGER DEFAULT 0, t INTEGER);
       CREATE TABLE IF NOT EXISTS rrc (fid TEXT, u TEXT, ch TEXT, nm TEXT, t INTEGER, PRIMARY KEY (fid, u));
       CREATE TABLE IF NOT EXISTS rlpf (u TEXT PRIMARY KEY, yr TEXT, rig TEXT, lift TEXT, tire TEXT, winch TEXT, arm TEXT, bio TEXT, home TEXT, radio TEXT, sk TEXT, cv INTEGER DEFAULT 0, cov TEXT, av TEXT, km REAL DEFAULT 0, trips INTEGER DEFAULT 0, ll REAL, lo REAL, la INTEGER DEFAULT 0, t INTEGER);`);
-    for (const c of ['mid TEXT', 'rb TEXT', 'rbu TEXT', 'cb TEXT', 'cbn TEXT', 'cfm INTEGER DEFAULT 0']) try { this.sql.exec('ALTER TABLE rlp ADD COLUMN ' + c); } catch (e) {}
+    for (const c of ['mid TEXT', 'rb TEXT', 'rbu TEXT', 'cb TEXT', 'cbn TEXT', 'cfm INTEGER DEFAULT 0', 'imgs TEXT']) try { this.sql.exec('ALTER TABLE rlp ADD COLUMN ' + c); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rln ADD COLUMN ex INTEGER DEFAULT 0'); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rlpf ADD COLUMN rt TEXT'); } catch (e) {} // rig type for the map pin (pickup, van, suv…)
     try { this.sql.exec('ALTER TABLE chk ADD COLUMN pushed INTEGER DEFAULT 0'); } catch (e) {}
@@ -300,7 +300,8 @@ export class Hub {
     this.sql.exec('DELETE FROM chk WHERE u=?', u); this.sql.exec('DELETE FROM rrc WHERE u=?', u); this.sql.exec('DELETE FROM psub WHERE u=?', u);
     this.sql.exec('DELETE FROM riders WHERE u=?', u);
   }
-  rlDel(id) { const r = this.q('SELECT img, au FROM rlp WHERE id=?', id)[0]; if (!r) return; [r.img, r.au, r.img ? r.img + 't' : ''].forEach(m => { if (m) this.sql.exec('DELETE FROM rlm WHERE id=?', m); });
+  rlDel(id) { const r = this.q('SELECT img, au, imgs FROM rlp WHERE id=?', id)[0]; if (!r) return; let ex = []; try { ex = JSON.parse(r.imgs || '[]'); } catch (e) {}
+    [r.img, r.au, r.img ? r.img + 't' : ''].concat(ex, ex.map(x => x + 't')).forEach(m => { if (m) this.sql.exec('DELETE FROM rlm WHERE id=?', m); });
     this.sql.exec('DELETE FROM rlp WHERE id=?', id); this.sql.exec('DELETE FROM rlr WHERE id=?', id); this.sql.exec('DELETE FROM rlc WHERE id=?', id); }
   leave(g, u) {
     this.sql.exec('DELETE FROM gm WHERE g=? AND u=?', g, u);
@@ -371,7 +372,7 @@ export class Hub {
       return new Response(JSON.stringify({ x }));
     }
     const p = new URL(req.url).pathname.slice(3), now = Date.now(), ip = req.headers.get('CF-Connecting-IP') || 'x';
-    let b; try { b = await body(req, p === 'backup' ? 70000 : p === 'rl' ? 900000 : p === 'send' ? 14000 : 8000); } catch (e) { return err('bad request'); }
+    let b; try { b = await body(req, p === 'backup' ? 70000 : p === 'rl' ? 2400000 : p === 'send' ? 14000 : 8000); } catch (e) { return err('bad request'); }
     const me = await rider(b); if (!me) return err('rider key missing');
     const U = me.u, ih = (await sha('awarebc-ip:' + ip)).slice(0, 16), isAdmin = this.admin(U);
     let name = clean(b.name, 24) || 'Rider'; if (RESERVED.test(name) && !isAdmin) name = 'Rider';
@@ -558,7 +559,7 @@ export class Hub {
       const out = r => { const mine = this.q('SELECT kind FROM rlr WHERE id=? AND u=?', r.id, U).map(x => x.kind);
         const cm = this.q('SELECT cid, u, by, tg, x, q, ans, t FROM rlc WHERE id=? ORDER BY (q=1 AND ans=0) DESC, cid DESC LIMIT 2', r.id).map(c => { const o = Object.assign({}, c, { fd: !!this.admin(c.u) }); delete o.u; return o; });
         return { id: r.id, t: r.t, by: r.by, tg: r.tg, kind: r.kind, lat: r.lat, lon: r.lon, x: r.x, el: r.el, tc: r.tc, st: r.st, rig: r.rig, tags: JSON.parse(r.tags || '[]'), parts: r.parts || '', radio: r.radio || '',
-          img: r.img || '', au: r.au || '', aud: r.aud || 0, likes: r.likes, ver: r.ver, nc: r.nc, me: r.u === U, liked: mine.includes('l'), verd: mine.includes('v'), cm,
+          img: r.img || '', imgs: (() => { try { return JSON.parse(r.imgs || '[]'); } catch (e) { return []; } })(), au: r.au || '', aud: r.aud || 0, likes: r.likes, ver: r.ver, nc: r.nc, me: r.u === U, liked: mine.includes('l'), verd: mine.includes('v'), cm,
           rb: r.rb || '', uc: !!(r.rb && !r.u), cb: r.cbn || '', cbme: !!r.cb && r.cb === U, cfm: r.cfm || 0, cfmd: mine.includes('k'), bd: badges(r.u), av: avOf(r.u), hl: r.kind === 'h' ? helpers(r.lat, r.lon) : undefined, fd: !!(r.u && this.admin(r.u)) }; };
       // ---- badges: Recovery, Sawyer, Scout, Wrench, Relay (Bronze 3 · Silver 10 · Gold 25) ----
       const pfOf = u => { const f = u && this.q('SELECT * FROM rlpf WHERE u=?', u)[0]; if (!f) return null;
@@ -648,6 +649,9 @@ export class Hub {
         const x = clean(b.x, 500), hide = !!b.hide || kind === 's', id = rid(); /* Showroom photos only keep a rough spot (about 1 km) */ let img = '', au = '';
         if (b.img) { const m = media(b.img, 320000, JP); if (!m || m.v[0] !== 0xff || m.v[1] !== 0xd8) return err('Photo not accepted'); img = rid() + rid(); this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', img, m.ty, m.v, now);
           const th = b.th ? media(b.th, 40000, JP) : null; if (th) this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', img + 't', th.ty, th.v, now); }
+        const imgs = []; if (kind === 's' && img && Array.isArray(b.imgs)) for (const e of b.imgs.slice(0, 4)) { // Showroom: up to 5 photos in one post
+          const m = e && media(e.img, 320000, JP); if (!m || m.v[0] !== 0xff || m.v[1] !== 0xd8) continue; const iid = rid() + rid(); this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', iid, m.ty, m.v, now);
+          const th = e.th ? media(e.th, 40000, JP) : null; if (th) this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', iid + 't', th.ty, th.v, now); imgs.push(iid); }
         if (b.au) { const m = media(b.au, 260000, AU); if (!m) return err('Voice clip not accepted'); au = rid() + rid(); this.sql.exec('INSERT INTO rlm (id, ty, v, t) VALUES (?, ?, ?, ?)', au, m.ty.split(';')[0], m.v, now); }
         if (!x && !img && !au && !clean(b.st, 20) && !(kind === 'r' && clean(b.rig, 40))) return err('Add a photo, a voice clip or some words.');
         if (kind === 's' && !img) return err('Add a photo of your machine.');
@@ -656,6 +660,7 @@ export class Hub {
           id, now, U, isAdmin ? 'Josh Singer' : name, me.t, kind === 's' ? '' : kh, kind, hide ? +lat.toFixed(2) : +lat.toFixed(5), hide ? +lon.toFixed(2) : +lon.toFixed(5), x, num(b.el, -500, 9000) != null ? Math.round(b.el) : null, num(b.tc, -60, 60),
           clean(b.st, 20), clean(b.rig, 40), JSON.stringify(tags), clean(b.parts, 1200), clean(b.radio, 40), img, au, num(b.aud, 0, 60) || 0);
         if (mid) this.sql.exec('UPDATE rlp SET mid=? WHERE id=?', mid, id);
+        if (imgs.length) this.sql.exec('UPDATE rlp SET imgs=? WHERE id=?', JSON.stringify(imgs), id);
         return json({ ok: true, p: out(this.q('SELECT * FROM rlp WHERE id=?', id)[0]) }); }
       const r = post(b.id); if (!r) return err('Post not found', 404);
       if (op === 'like' || op === 'verify') { const kd = op === 'like' ? 'l' : 'v', col = op === 'like' ? 'likes' : 'ver', has = this.q('SELECT 1 FROM rlr WHERE id=? AND u=? AND kind=?', r.id, U, kd).length;
