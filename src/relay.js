@@ -104,7 +104,9 @@ if (!m || t.search) return null;
 const lat = +m[1], lon = +m[2], r = +m[3];
 if (Math.abs(lat) > 90 || Math.abs(lon) > 180 || r < 1 || r > 250) return null;
 const qLat = (Math.round(lat * 10) / 10).toFixed(1), qLon = (Math.round(lon * 10) / 10).toFixed(1), qR = Math.min(250, Math.ceil((r + 3) / 25) * 25);
-return { url: 'https://api.adsb.lol/v2/point/' + qLat + '/' + qLon + '/' + qR, fresh: 6, stale: 300 };
+// adsb.lol often refuses cloud servers (429), so the same area is asked from airplanes.live, then adsb.fi (both free, same plane data format)
+return { url: 'https://api.adsb.lol/v2/point/' + qLat + '/' + qLon + '/' + qR, fresh: 6, stale: 300,
+  alt: ['https://api.airplanes.live/v2/point/' + qLat + '/' + qLon + '/' + qR, 'https://opendata.adsb.fi/api/v2/lat/' + qLat + '/lon/' + qLon + '/dist/' + qR] };
 }
 if (t.hostname === 'aviationweather.gov') {
 const p = t.searchParams, keys = [...p.keys()].sort().join(',');
@@ -240,10 +242,13 @@ const cache = caches.default, key = new Request(r.url), staleKey = new Request(r
 let res = await cache.match(key);
 if (!res) {
 let upstream = null, body = '';
+for (const u of [r.url].concat(r.alt || [])) {
 try {
-upstream = await fetch(r.url, { headers: { 'User-Agent': 'singers-flight-tracker-relay/6.0', 'Accept': r.accept || 'application/json' } });
+upstream = await fetch(u, { headers: { 'User-Agent': 'AwareBC/1.0 (flight relay)', 'Accept': r.accept || 'application/json' } });
 body = await upstream.text();
 } catch (e) { upstream = null; }
+if (upstream && upstream.ok) { if (r.alt && body.indexOf('"aircraft"') >= 0 && body.indexOf('"ac"') < 0) { try { const j = JSON.parse(body); body = JSON.stringify({ ac: j.aircraft || [], now: j.now ? (j.now < 1e12 ? Math.round(j.now * 1000) : j.now) : Date.now(), total: (j.aircraft || []).length }); } catch (e) {} } break; }
+}
 if (upstream && upstream.ok && body.length < 3000000) {
 res = new Response(body, { status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=' + r.fresh } });
 ctx.waitUntil(cache.put(key, res.clone()));
