@@ -247,7 +247,7 @@ if (!res) {
 let upstream = null, body = '';
 for (const u of [r.url].concat(r.alt || [])) {
 try {
-upstream = await fetch(u, { headers: { 'User-Agent': 'AwareBC/1.0 (flight relay)', 'Accept': r.accept || 'application/json' } });
+upstream = await fetch(u, { headers: { 'User-Agent': 'AwareBC/1.0 (flight relay)', 'Accept': r.accept || 'application/json' }, signal: r.alt ? AbortSignal.timeout(5000) : undefined });
 body = await upstream.text();
 } catch (e) { upstream = null; }
 if (upstream && upstream.ok && u.indexOf('opensky-network.org') > 0) { try { body = JSON.stringify(fromOsky(JSON.parse(body))); } catch (e) { upstream = null; continue; } break; }
