@@ -96,6 +96,9 @@ break;
 }
 return { phones, image };
 }
+/* OpenSky (free, last resort): a box around the same circle; its rows are turned into the same plane format below */
+function osky(la, lo, r) { const dy = r / 60, dx = r / (60 * Math.max(0.2, Math.cos(la * Math.PI / 180))); return 'https://opensky-network.org/api/states/all?lamin=' + (la - dy).toFixed(2) + '&lomin=' + (lo - dx).toFixed(2) + '&lamax=' + (la + dy).toFixed(2) + '&lomax=' + (lo + dx).toFixed(2); }
+function fromOsky(j) { const ac = (j.states || []).filter(s => s[6] != null && s[5] != null).map(s => ({ hex: s[0], flight: (s[1] || '').trim(), lat: s[6], lon: s[5], alt_baro: s[8] ? 'ground' : (s[7] != null ? Math.round(s[7] * 3.28084) : undefined), alt_geom: s[13] != null ? Math.round(s[13] * 3.28084) : undefined, gs: s[9] != null ? Math.round(s[9] * 1.94384) : undefined, track: s[10], baro_rate: s[11] != null ? Math.round(s[11] * 196.85) : undefined, squawk: s[14] || undefined, seen: j.time && s[4] ? Math.max(0, j.time - s[4]) : 0, src: 'opensky' })); return { ac, now: (j.time || Date.now() / 1000) * 1000, total: ac.length }; }
 function route(t) {
 if (t.protocol !== 'https:' || t.port || t.username || t.password || t.hash) return null;
 if (t.hostname === 'api.adsb.lol') {
@@ -105,8 +108,8 @@ const lat = +m[1], lon = +m[2], r = +m[3];
 if (Math.abs(lat) > 90 || Math.abs(lon) > 180 || r < 1 || r > 250) return null;
 const qLat = (Math.round(lat * 10) / 10).toFixed(1), qLon = (Math.round(lon * 10) / 10).toFixed(1), qR = Math.min(250, Math.ceil((r + 3) / 25) * 25);
 // adsb.lol often refuses cloud servers (429), so the same area is asked from airplanes.live, then adsb.fi (both free, same plane data format)
-return { url: 'https://api.adsb.lol/v2/point/' + qLat + '/' + qLon + '/' + qR, fresh: 6, stale: 300,
-  alt: ['https://api.airplanes.live/v2/point/' + qLat + '/' + qLon + '/' + qR, 'https://opendata.adsb.fi/api/v2/lat/' + qLat + '/lon/' + qLon + '/dist/' + qR] };
+return { url: 'https://api.adsb.lol/v2/point/' + qLat + '/' + qLon + '/' + qR, fresh: 10, stale: 300,
+  alt: ['https://api.airplanes.live/v2/point/' + qLat + '/' + qLon + '/' + qR, 'https://opendata.adsb.fi/api/v2/lat/' + qLat + '/lon/' + qLon + '/dist/' + qR, osky(+qLat, +qLon, qR)] };
 }
 if (t.hostname === 'aviationweather.gov') {
 const p = t.searchParams, keys = [...p.keys()].sort().join(',');
@@ -247,6 +250,7 @@ try {
 upstream = await fetch(u, { headers: { 'User-Agent': 'AwareBC/1.0 (flight relay)', 'Accept': r.accept || 'application/json' } });
 body = await upstream.text();
 } catch (e) { upstream = null; }
+if (upstream && upstream.ok && u.indexOf('opensky-network.org') > 0) { try { body = JSON.stringify(fromOsky(JSON.parse(body))); } catch (e) { upstream = null; continue; } break; }
 if (upstream && upstream.ok) { if (r.alt && body.indexOf('"aircraft"') >= 0 && body.indexOf('"ac"') < 0) { try { const j = JSON.parse(body); body = JSON.stringify({ ac: j.aircraft || [], now: j.now ? (j.now < 1e12 ? Math.round(j.now * 1000) : j.now) : Date.now(), total: (j.aircraft || []).length }); } catch (e) {} } break; }
 }
 if (upstream && upstream.ok && body.length < 3000000) {
