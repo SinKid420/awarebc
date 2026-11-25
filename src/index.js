@@ -118,6 +118,10 @@ export default {
     const url = new URL(req.url), p = url.pathname, ip = req.headers.get('CF-Connecting-IP') || 'x';
     try {
       // list reports in a map box (cached 20 s at the edge)
+      // rough area from the internet connection (Cloudflare's own lookup: no outside service, nothing stored). Used only when the phone or computer can't share its location.
+      if (req.method === 'GET' && p === '/where') { const cf = req.cf || {}, la = +cf.latitude, lo = +cf.longitude;
+        if (!isFinite(la) || !isFinite(lo)) return json({ ok: false });
+        return json({ ok: true, lat: Math.round(la * 100) / 100, lon: Math.round(lo * 100) / 100, city: cf.city || '', region: cf.region || '', country: cf.country || '' }) }
       if (req.method === 'GET' && p === '/places') { // AwareBC's own places list (businesses people added), read by anyone using the app
         const s = num(url.searchParams.get('s'), -90, 90), n = num(url.searchParams.get('n'), -90, 90), w = num(url.searchParams.get('w'), -180, 180), e = num(url.searchParams.get('e'), -180, 180);
         if (s == null || n == null || w == null || e == null || n - s > 2 || e - w > 3) return err('bad box');
