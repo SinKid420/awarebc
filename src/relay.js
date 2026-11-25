@@ -108,7 +108,7 @@ const lat = +m[1], lon = +m[2], r = +m[3];
 if (Math.abs(lat) > 90 || Math.abs(lon) > 180 || r < 1 || r > 250) return null;
 const qLat = (Math.round(lat * 10) / 10).toFixed(1), qLon = (Math.round(lon * 10) / 10).toFixed(1), qR = Math.min(250, Math.ceil((r + 3) / 25) * 25);
 // adsb.lol often refuses cloud servers (429), so the same area is asked from airplanes.live, then adsb.fi (both free, same plane data format)
-return { url: 'https://api.adsb.lol/v2/point/' + qLat + '/' + qLon + '/' + qR, fresh: 10, stale: 300,
+return { url: 'https://api.adsb.lol/v2/point/' + qLat + '/' + qLon + '/' + qR, fresh: 10, stale: 300, fia: 'https://api.flyitalyadsb.com/v2/lat/' + qLat + '/lon/' + qLon + '/dist/' + Math.min(500, Math.ceil(qR * 1.852)),
   alt: ['https://api.airplanes.live/v2/point/' + qLat + '/' + qLon + '/' + qR, 'https://opendata.adsb.fi/api/v2/lat/' + qLat + '/lon/' + qLon + '/dist/' + qR, osky(+qLat, +qLon, qR)] };
 }
 if (t.hostname === 'aviationweather.gov') {
@@ -245,9 +245,11 @@ const cache = caches.default, key = new Request(r.url), staleKey = new Request(r
 let res = await cache.match(key);
 if (!res) {
 let upstream = null, body = '';
-for (const u of [r.url].concat(r.alt || [])) {
+/* FlyItalyADSB first when the owner's key is saved as a Cloudflare secret (FIA_KEY): never in the code, never sent to phones */
+const fk = env && env.FIA_KEY;
+for (const u of (fk && r.fia ? [r.fia] : []).concat([r.url], r.alt || [])) {
 try {
-upstream = await fetch(u, { headers: { 'User-Agent': 'AwareBC/1.0 (flight relay)', 'Accept': r.accept || 'application/json' }, signal: r.alt ? AbortSignal.timeout(5000) : undefined });
+upstream = await fetch(u, { headers: Object.assign({ 'User-Agent': 'AwareBC/1.0 (flight relay)', 'Accept': r.accept || 'application/json' }, u === r.fia ? { 'X-Api-Key': fk } : {}), signal: r.alt ? AbortSignal.timeout(5000) : undefined });
 body = await upstream.text();
 } catch (e) { upstream = null; }
 if (upstream && upstream.ok && u.indexOf('opensky-network.org') > 0) { try { body = JSON.stringify(fromOsky(JSON.parse(body))); } catch (e) { upstream = null; continue; } break; }
