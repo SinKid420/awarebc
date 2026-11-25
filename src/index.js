@@ -223,6 +223,8 @@ const WHY = ['spam', 'harass', 'scam', 'unsafe', 'other'];
 const SKL = ['aid', 'rec'];
 const PF = ['yr', 'rig', 'lift', 'tire', 'winch', 'arm', 'home', 'radio'];
 const RT = ['pickup', 'van', 'jeep', 'suv', 'wagon', 'mid', 'utv', 'quad', 'bike', 'sled'];
+const RC = ['white', 'silver', 'grey', 'black', 'red', 'maroon', 'orange', 'yellow', 'lime', 'green', 'army', 'teal', 'sky', 'blue', 'navy', 'purple', 'pink', 'tan', 'brown', 'bronze'];
+const hdg = v => { const n = Math.round(+v); return isFinite(n) && n >= 0 && n < 360 ? n : null; };
 const PB = ['overland', 'camp', 'fish', 'hunt', 'sled', 'dirt', 'sxs', '4x4', 'photo', 'ham', 'aid', 'dog', 'log', 'ranch', 'local', 'hike', 'mtb', 'paddle', 'ski', 'atv', 'gear', 'shoe', 'strap', 'sat', 'saw', 'fuel', 'air', 'jump', 'ext', 'ava', 'bear', 'h2o', 'wfa', 'trac', 'chain', 'satnet', 'spare', 'pbank'];
 const ID = /^[0-9a-f]{24}$/, GID = /^[a-z0-9]{8,20}$/;
 const dmId = (a, b) => 'd:' + [a, b].sort().join(':');
@@ -269,6 +271,9 @@ export class Hub {
     for (const c of ['mid TEXT', 'rb TEXT', 'rbu TEXT', 'cb TEXT', 'cbn TEXT', 'cfm INTEGER DEFAULT 0', 'imgs TEXT', 'vis INTEGER DEFAULT 0', 'cat TEXT']) try { this.sql.exec('ALTER TABLE rlp ADD COLUMN ' + c); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rln ADD COLUMN ex INTEGER DEFAULT 0'); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rlpf ADD COLUMN rt TEXT'); } catch (e) {}
+    try { this.sql.exec('ALTER TABLE rlpf ADD COLUMN rc TEXT'); } catch (e) {}
+    try { this.sql.exec('ALTER TABLE rln ADD COLUMN hd INTEGER'); } catch (e) {}
+    try { this.sql.exec('ALTER TABLE rlg ADD COLUMN hd INTEGER'); } catch (e) {}
     this.sql.exec('CREATE TABLE IF NOT EXISTS rlfo (u TEXT, f TEXT, t INTEGER, PRIMARY KEY (u, f))'); // Showroom: rider u follows rider f // rig type for the map pin (pickup, van, suv…)
     try { this.sql.exec('ALTER TABLE chk ADD COLUMN pushed INTEGER DEFAULT 0'); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rlg ADD COLUMN role TEXT'); } catch (e) {}
@@ -568,7 +573,7 @@ export class Hub {
           rb: r.rb || '', uc: !!(r.rb && !r.u), cb: r.cbn || '', cbme: !!r.cb && r.cb === U, cfm: r.cfm || 0, cfmd: mine.includes('k'), bd: badges(r.u), av: avOf(r.u), vis: r.vis || 0, cat: r.cat || '', fo: r.kind === 's' && r.u && r.u !== U ? this.q('SELECT 1 FROM rlfo WHERE u=? AND f=?', U, r.u).length > 0 : undefined, hl: r.kind === 'h' ? helpers(r.lat, r.lon) : undefined, fd: !!(r.u && this.admin(r.u)) }; };
       // ---- badges: Recovery, Sawyer, Scout, Wrench, Relay (Bronze 3 · Silver 10 · Gold 25) ----
       const pfOf = u => { const f = u && this.q('SELECT * FROM rlpf WHERE u=?', u)[0]; if (!f) return null;
-        return { rt: f.rt || '', yr: f.yr || '', rig: f.rig || '', lift: f.lift || '', tire: f.tire || '', winch: f.winch || '', arm: f.arm || '', bio: f.bio || '', home: f.home || '', radio: f.radio || '',
+        return { rt: f.rt || '', rc: f.rc || '', yr: f.yr || '', rig: f.rig || '', lift: f.lift || '', tire: f.tire || '', winch: f.winch || '', arm: f.arm || '', bio: f.bio || '', home: f.home || '', radio: f.radio || '',
           sk: String(f.sk || '').split(',').filter(x => SKL.includes(x)), cv: !!f.cv, cov: f.cov || '', av: f.av || '', km: Math.round(f.km || 0), trips: f.trips || 0 }; };
       const avOf = u => { const f = u && this.q('SELECT av FROM rlpf WHERE u=?', u)[0]; return f && f.av || ''; };
       // help calls: how many riders seen nearby in the last 15 min have first aid or recovery gear
@@ -585,9 +590,9 @@ export class Hub {
       if (op === 'crigs') { // convoy rigs for the main map (Off-road), and my own spot if I share it with the convoy
         if (!key) return err('No convoy'); const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (lat == null || lon == null) return err('No spot');
         const role = ['lead', 'sweep'].includes(b.role) ? b.role : '';
-        if (b.share) this.sql.exec('INSERT OR REPLACE INTO rlg (k, u, by, tg, rig, lat, lon, at, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', kh, U, isAdmin ? 'Josh Singer' : name, me.t, clean(b.rig, 40), +lat.toFixed(5), +lon.toFixed(5), now, role);
-        const r = this.q('SELECT g.u, g.by, g.tg, g.rig, g.lat, g.lon, g.at, g.role, f.rt FROM rlg g LEFT JOIN rlpf f ON f.u=g.u WHERE g.k=? AND g.u<>? AND g.at>? LIMIT 60', kh, U, now - 30 * 60000);
-        return json({ r: r.map(x => ({ by: x.by, tg: x.tg, rig: x.rig, lat: x.lat, lon: x.lon, at: x.at, role: x.role || '', rt: x.rt || '', fd: !!this.admin(x.u) })) }); }
+        if (b.share) this.sql.exec('INSERT OR REPLACE INTO rlg (k, u, by, tg, rig, lat, lon, at, role, hd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', kh, U, isAdmin ? 'Josh Singer' : name, me.t, clean(b.rig, 40), +lat.toFixed(5), +lon.toFixed(5), now, role, hdg(b.hd));
+        const r = this.q('SELECT g.u, g.by, g.tg, g.rig, g.lat, g.lon, g.at, g.role, g.hd, f.rt, f.rc FROM rlg g LEFT JOIN rlpf f ON f.u=g.u WHERE g.k=? AND g.u<>? AND g.at>? LIMIT 60', kh, U, now - 30 * 60000);
+        return json({ r: r.map(x => ({ by: x.by, tg: x.tg, rig: x.rig, lat: x.lat, lon: x.lon, at: x.at, role: x.role || '', rt: x.rt || '', rc: x.rc || '', hd: x.hd == null ? undefined : x.hd, fd: !!this.admin(x.u) })) }); }
       if (op === 'near') { // Nearby riders (Off-road, opt-in): see and be seen, rough spot only (about 1 km)
         const lat = num(b.lat, -90, 90), lon = num(b.lon, -180, 180); if (lat == null || lon == null) return err('No spot');
         if (!b.share) { this.sql.exec('DELETE FROM rln WHERE u=?', U); return json({ r: [] }); }
@@ -597,11 +602,16 @@ export class Hub {
           if (f && f.la && gap < 30 * 60000) { const r = Math.PI / 180, d = 6371 * 2 * Math.asin(Math.sqrt(Math.sin((lat - f.ll) * r / 2) ** 2 + Math.cos(lat * r) * Math.cos(f.ll * r) * Math.sin((lon - f.lo) * r / 2) ** 2)); if (d > 0.05 && d < gap / 60000 * 2.5) add = d; } // ignore GPS jitter and jumps
           if (gap > 50000 || add) this.sql.exec('UPDATE rlpf SET km=km+?, trips=trips+?, ll=?, lo=?, la=? WHERE u=?', add, trip, lat, lon, now, U); }
         const ex = b.ex ? 1 : 0; // exact spot, or rounded to about 1 km
-        this.sql.exec('INSERT OR REPLACE INTO rln (u, by, tg, rig, lat, lon, at, ex) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', U, isAdmin ? 'Josh Singer' : name, me.t, clean(b.rig, 40), ex ? +lat.toFixed(5) : Math.round(lat * 100) / 100, ex ? +lon.toFixed(5) : Math.round(lon * 100) / 100, now, ex);
+        this.sql.exec('INSERT OR REPLACE INTO rln (u, by, tg, rig, lat, lon, at, ex, hd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', U, isAdmin ? 'Josh Singer' : name, me.t, clean(b.rig, 40), ex ? +lat.toFixed(5) : Math.round(lat * 100) / 100, ex ? +lon.toFixed(5) : Math.round(lon * 100) / 100, now, ex, hdg(b.hd));
         if (b.see === 0 || b.see === '0') return json({ r: [] }); // they hid other riders on their own map: still seen, nothing to send back
-        const r = this.q('SELECT n.u, n.by, n.tg, n.rig, n.lat, n.lon, n.at, n.ex, f.cv, f.av, f.rt FROM rln n LEFT JOIN rlpf f ON f.u=n.u WHERE n.u<>? AND at>? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? ORDER BY at DESC LIMIT 60', U, now - 15 * 60000, lat - 0.6, lat + 0.6, lon - 0.9, lon + 0.9);
+        const r = this.q('SELECT n.u, n.by, n.tg, n.rig, n.lat, n.lon, n.at, n.ex, n.hd, f.cv, f.av, f.rt, f.rc FROM rln n LEFT JOIN rlpf f ON f.u=n.u WHERE n.u<>? AND at>? AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? ORDER BY at DESC LIMIT 60', U, now - 15 * 60000, lat - 0.6, lat + 0.6, lon - 0.9, lon + 0.9);
         const bl = new Set(this.q('SELECT b FROM blocks WHERE a=?', U).map(x => x.b).concat(this.q('SELECT a FROM blocks WHERE b=?', U).map(x => x.a)));
-        return json({ r: r.filter(x => !bl.has(x.u)).map(x => ({ by: x.by, tg: x.tg, rig: x.rig, lat: x.lat, lon: x.lon, at: x.at, ex: !!x.ex, cv: !!x.cv, av: x.av || '', rt: x.rt || '', fd: !!this.admin(x.u) })) }); }
+        return json({ r: r.filter(x => !bl.has(x.u)).map(x => ({ by: x.by, tg: x.tg, rig: x.rig, lat: x.lat, lon: x.lon, at: x.at, ex: !!x.ex, cv: !!x.cv, av: x.av || '', rt: x.rt || '', rc: x.rc || '', hd: x.hd == null ? undefined : x.hd, fd: !!this.admin(x.u) })) }); }
+      if (op === 'rig') { // just the rig type and paint colour (the rest of the profile stays as it is)
+        if (this.lim('rg' + U, 60, DAY)) return err('That\'s a lot of rig changes today.', 429);
+        this.sql.exec('INSERT OR IGNORE INTO rlpf (u, t) VALUES (?, ?)', U, now);
+        this.sql.exec('UPDATE rlpf SET rt=?, rc=? WHERE u=?', RT.includes(b.rt) ? b.rt : '', RC.includes(b.rc) ? b.rc : '', U);
+        return json({ ok: true, rt: RT.includes(b.rt) ? b.rt : '', rc: RC.includes(b.rc) ? b.rc : '' }); }
       if (op === 'pf') { // rider profile: rig bio, cover and profile photos, home area, radio, skills, open to convoy
         if (this.lim('pf' + U, 40, DAY)) return err('That\'s a lot of profile changes today.', 429);
         this.sql.exec('INSERT OR IGNORE INTO rlpf (u, t) VALUES (?, ?)', U, now); const old = this.q('SELECT cov, av FROM rlpf WHERE u=?', U)[0];
