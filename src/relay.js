@@ -246,12 +246,13 @@ let res = await cache.match(key);
 if (!res) {
 let upstream = null, body = '';
 /* FlyItalyADSB first when the owner's key is saved as a Cloudflare secret (FIA_KEY): never in the code, never sent to phones */
-const fk = env && env.FIA_KEY;
+const fk = env && env.FIA_KEY; const tries = [];
 for (const u of (fk && r.fia ? [r.fia] : []).concat([r.url], r.alt || [])) {
 try {
 upstream = await fetch(u, { headers: Object.assign({ 'User-Agent': 'AwareBC/1.0 (flight relay)', 'Accept': r.accept || 'application/json' }, u === r.fia ? { 'X-Api-Key': fk } : {}), signal: r.alt ? AbortSignal.timeout(5000) : undefined });
 body = await upstream.text();
 } catch (e) { upstream = null; }
+tries.push(new URL(u).hostname.split('.').slice(-2, -1)[0] + ':' + (upstream ? upstream.status : 'x'));
 if (upstream && upstream.ok && u.indexOf('opensky-network.org') > 0) { try { body = JSON.stringify(fromOsky(JSON.parse(body))); } catch (e) { upstream = null; continue; } break; }
 if (upstream && upstream.ok) { if (r.alt && body.indexOf('"aircraft"') >= 0 && body.indexOf('"ac"') < 0) { try { const j = JSON.parse(body); body = JSON.stringify({ ac: j.aircraft || [], now: j.now ? (j.now < 1e12 ? Math.round(j.now * 1000) : j.now) : Date.now(), total: (j.aircraft || []).length }); } catch (e) {} } break; }
 }
@@ -263,7 +264,7 @@ ctx.waitUntil(cache.put(staleKey, new Response(body, { status: 200, headers: { '
 const stale = await cache.match(staleKey);
 if (stale) res = stale;
 else if (upstream) res = new Response(body.slice(0, 200), { status: upstream.status, headers: { 'Content-Type': 'text/plain' } });
-else return reply('Feed unreachable', 502, allowOrigin);
+else return reply('Feed unreachable (' + (fk ? 'key on; ' : 'no key; ') + tries.join(' ') + ')', 502, allowOrigin);
 }
 }
 const out = new Response(res.body, res);
