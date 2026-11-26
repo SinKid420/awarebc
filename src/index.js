@@ -308,6 +308,9 @@ export class Hub {
     this.q('SELECT id FROM rlp WHERE u=?', u).forEach(r => this.rlDel(r.id)); this.sql.exec('DELETE FROM rlc WHERE u=?', u); this.sql.exec('DELETE FROM rlfo WHERE u=? OR f=?', u, u); this.sql.exec('DELETE FROM rlg WHERE u=?', u); this.sql.exec('DELETE FROM rlr WHERE u=?', u);
     { const f = this.q('SELECT cov, av FROM rlpf WHERE u=?', u)[0]; if (f) [f.cov, f.av].forEach(m => { if (m) this.sql.exec('DELETE FROM rlm WHERE id=?', m); }); this.sql.exec('DELETE FROM rlpf WHERE u=?', u); }
     this.sql.exec('DELETE FROM chk WHERE u=?', u); this.sql.exec('DELETE FROM rrc WHERE u=?', u); this.sql.exec('DELETE FROM psub WHERE u=?', u);
+    /* full account deletion: badges, keys, nearby spot, places and flags this rider made */
+    this.sql.exec('DELETE FROM rlk WHERE u=?', u); this.sql.exec('DELETE FROM rlb WHERE u=?', u); this.sql.exec('DELETE FROM rlba WHERE u=? OR by=?', u, u); this.sql.exec('DELETE FROM rln WHERE u=?', u);
+    this.sql.exec('DELETE FROM pflags WHERE by=?', u); this.q('SELECT id FROM places WHERE u=?', u).forEach(r => { this.sql.exec('DELETE FROM pflags WHERE id=?', r.id); this.sql.exec('DELETE FROM places WHERE id=?', r.id); });
     this.sql.exec('DELETE FROM riders WHERE u=?', u);
   }
   rlDel(id) { const r = this.q('SELECT img, au, imgs FROM rlp WHERE id=?', id)[0]; if (!r) return; let ex = []; try { ex = JSON.parse(r.imgs || '[]'); } catch (e) {}
