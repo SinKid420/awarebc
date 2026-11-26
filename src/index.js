@@ -753,6 +753,12 @@ export class Hub {
         const st = { riders: this.q('SELECT count(*) AS c FROM riders')[0].c, week: this.q('SELECT count(*) AS c FROM riders WHERE seen>?', now - 7 * DAY)[0].c, msgs: this.q('SELECT count(*) AS c FROM msgs WHERE t>?', now - DAY)[0].c };
         return json({ flags: r, st });
       }
+      if (b.op === 'find') { // owner tool: find a rider by tag (like 4K7Q) for an emailed deletion request
+        const tg = String(b.tag || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(-4); if (tg.length !== 4) return err('Type the 4-character tag, like 4K7Q');
+        const m = {}; this.q('SELECT u, n, seen FROM riders WHERE t=?', tg).forEach(r => { m[r.u] = { id: r.u, n: r.n, seen: r.seen }; });
+        this.q('SELECT u, by, at FROM rln WHERE tg=?', tg).forEach(r => { m[r.u] = m[r.u] || { id: r.u, n: r.by, seen: r.at }; });
+        this.q('SELECT DISTINCT u, by, t FROM rlp WHERE tg=? AND u IS NOT NULL LIMIT 5', tg).forEach(r => { m[r.u] = m[r.u] || { id: r.u, n: r.by, seen: r.t }; });
+        return json({ tag: tg, riders: Object.values(m).slice(0, 5) }); }
       const o = String(b.id || ''); if (!ID.test(o)) return err('bad rider');
       if (b.op === 'mute') this.sql.exec('UPDATE riders SET mute=? WHERE u=?', now + (num(b.days, 1, 3650) || 7) * DAY, o);
       else if (b.op === 'unmute') this.sql.exec('UPDATE riders SET mute=0 WHERE u=?', o);
