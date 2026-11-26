@@ -43,3 +43,25 @@ export async function send(sub, msg, jwk, pubB64, fetchFn) {
   const r = await (fetchFn || fetch)(sub.ep, { method: 'POST', body, headers: { 'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: String(msg.ttl || 86400), Urgency: msg.urg || 'high', Topic: String(msg.tag || 'aw').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'aw', Authorization: await vapidAuth(sub.ep, jwk, ub64u(pubB64)) } });
   return r.status;
 }
+
+// ---- Android app alerts through Firebase Cloud Messaging (HTTP v1). Needs the FCM_SA secret (the Firebase service account JSON) in Cloudflare. ----
+let fcmTok = null;
+function pem2der(p) { const b = atob(String(p).replace(/-----[^-]+-----/g, '').replace(/\s+/g, '')); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+async function fcmAccess(sa, fetchFn) {
+  if (fcmTok && fcmTok.exp > Date.now() + 60000) return fcmTok.t;
+  const now = Math.floor(Date.now() / 1000), enc = o => b64u(new TextEncoder().encode(JSON.stringify(o)));
+  const head = enc({ alg: 'RS256', typ: 'JWT' }), body = enc({ iss: sa.client_email, scope: 'https://www.googleapis.com/auth/firebase.messaging', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 });
+  const key = await crypto.subtle.importKey('pkcs8', pem2der(sa.private_key), { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+  const sig = b64u(await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(head + '.' + body)));
+  const r = await (fetchFn || fetch)('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=' + head + '.' + body + '.' + sig });
+  const j = await r.json(); if (!j.access_token) throw new Error('fcm auth'); fcmTok = { t: j.access_token, exp: Date.now() + (j.expires_in || 3600) * 1000 }; return fcmTok.t;
+}
+// returns the HTTP status; 404 means the phone's token is gone
+export async function fcmSend(saJson, token, msg, fetchFn) {
+  let sa; try { sa = JSON.parse(saJson); } catch (e) { return 0; } if (!sa.private_key || !sa.client_email || !sa.project_id) return 0;
+  const at = await fcmAccess(sa, fetchFn), tag = String(msg.tag || 'aw').slice(0, 60);
+  const r = await (fetchFn || fetch)('https://fcm.googleapis.com/v1/projects/' + encodeURIComponent(sa.project_id) + '/messages:send', { method: 'POST', headers: { 'Authorization': 'Bearer ' + at, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: { token, notification: { title: String(msg.title || 'AwareBC').slice(0, 120), body: String(msg.body || '').slice(0, 400) }, data: { url: String(msg.url || './'), tag },
+      android: { priority: msg.urg === 'normal' ? 'NORMAL' : 'HIGH', notification: { tag, channel_id: msg.urg === 'normal' ? 'chat' : 'danger', icon: 'ic_tracking' } } } }) });
+  return r.status;
+}

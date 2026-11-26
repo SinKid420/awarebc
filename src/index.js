@@ -6,7 +6,7 @@
 // - Danger reports (Caution / Blocked) need the poster, or 2 different riders, to clear them.  - 3+ reports earns a "trusted" tick.
 // - Friends: add by rider tag, see accepted friends' spots (only while they share), chat 1-to-1 and in groups (class Hub below).
 import relay from './relay.js';
-import { makeVapid, send as wpSend, PUSH_HOSTS } from './push.js'; // flight relay (was the separate skyrelay server)
+import { makeVapid, send as wpSend, PUSH_HOSTS, fcmSend } from './push.js'; // flight relay (was the separate skyrelay server)
 const ORIGIN = 'https://sinkid420.github.io';
 const MAX = 1000; // newest 1000 reports are kept
 const WEEK = 7 * 86400000; // cleared reports stay this long
@@ -329,7 +329,7 @@ export class Hub {
     if (!r) { const v = await makeVapid(); this.sql.exec("INSERT OR IGNORE INTO meta (k, v) VALUES ('vapid', ?)", JSON.stringify(v)); r = this.q("SELECT v FROM meta WHERE k='vapid'")[0]; }
     return this._vk = JSON.parse(typeof r.v === 'string' ? r.v : new TextDecoder().decode(new Uint8Array(r.v))); }
   notify(u, msg) { const subs = this.q('SELECT ep, p256dh, auth FROM psub WHERE u=? LIMIT 5', u); if (!subs.length) return;
-    const job = this.vapid().then(vk => Promise.all(subs.map(sb => wpSend(sb, msg, vk.jwk, vk.pub, this.env.PUSHFETCH).then(st => { if (st === 404 || st === 410) this.sql.exec('DELETE FROM psub WHERE ep=?', sb.ep); }).catch(() => {})))).catch(() => {});
+    const job = this.vapid().then(vk => Promise.all(subs.map(sb => (sb.ep.startsWith('fcm:') ? (this.env.FCM_SA ? fcmSend(this.env.FCM_SA, sb.ep.slice(4), msg, this.env.PUSHFETCH) : Promise.resolve(0)) : wpSend(sb, msg, vk.jwk, vk.pub, this.env.PUSHFETCH)).then(st => { if (st === 404 || st === 410) this.sql.exec('DELETE FROM psub WHERE ep=?', sb.ep); }).catch(() => {})))).catch(() => {});
     try { this.state.waitUntil(job); } catch (e) {} return job; }
   async wake(at) { try { const a = await this.state.storage.getAlarm(); if (!a || a > at) await this.state.storage.setAlarm(at); } catch (e) {} }
   async overdue(now) { // "Back by" timers that ran out: tell the friends that were picked
@@ -478,6 +478,9 @@ export class Hub {
       const cur = this.q('SELECT v FROM meta WHERE k=?', mk)[0], used = cur ? +cur.v || 0 : 0;
       if (n && !this.lim('mb' + U, 120, DAY)) this.sql.exec('INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)', mk, String(used + n));
       const tot = used + n; return json({ on: tot < LIMIT, used: tot, limit: LIMIT }); }
+    if (p === 'psub' && b.fcm) { const tk = String(b.fcm); if (!/^[A-Za-z0-9_:\-]{100,400}$/.test(tk)) return err('That alert subscription was not accepted.'); // Android app (Firebase)
+      if (this.q('SELECT count(*) AS c FROM psub WHERE u=?', U)[0].c >= 5) this.sql.exec('DELETE FROM psub WHERE ep IN (SELECT ep FROM psub WHERE u=? ORDER BY t LIMIT 1)', U);
+      this.sql.exec('INSERT OR REPLACE INTO psub (ep, u, p256dh, auth, t) VALUES (?, ?, ?, ?, ?)', 'fcm:' + tk, U, '', '', now); return json({ ok: true, fcm: !!this.env.FCM_SA }); }
     if (p === 'psub') { const ep = String(b.ep || '').slice(0, 800); let h = ''; try { const pu = new URL(ep); h = pu.protocol === 'https:' ? pu.hostname : ''; } catch (e) {}
       if (!PUSH_HOSTS.test(h) || !/^[A-Za-z0-9_-]{80,100}$/.test(String(b.p256dh || '')) || !/^[A-Za-z0-9_-]{20,24}$/.test(String(b.auth || ''))) return err('That alert subscription was not accepted.');
       if (this.q('SELECT count(*) AS c FROM psub WHERE u=?', U)[0].c >= 5) this.sql.exec('DELETE FROM psub WHERE ep IN (SELECT ep FROM psub WHERE u=? ORDER BY t LIMIT 1)', U);
