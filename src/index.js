@@ -274,6 +274,7 @@ export class Hub {
     try { this.sql.exec('ALTER TABLE rlpf ADD COLUMN rc TEXT'); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rln ADD COLUMN hd INTEGER'); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rlg ADD COLUMN hd INTEGER'); } catch (e) {}
+    this.sql.exec('CREATE TABLE IF NOT EXISTS crashes (id INTEGER PRIMARY KEY AUTOINCREMENT, t INTEGER, v TEXT, k TEXT, m TEXT, s TEXT, dev TEXT)'); // anonymous crash reports (no rider ID, no location)
     this.sql.exec('CREATE TABLE IF NOT EXISTS rlfo (u TEXT, f TEXT, t INTEGER, PRIMARY KEY (u, f))'); // Showroom: rider u follows rider f // rig type for the map pin (pickup, van, suv…)
     try { this.sql.exec('ALTER TABLE chk ADD COLUMN pushed INTEGER DEFAULT 0'); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rlg ADD COLUMN role TEXT'); } catch (e) {}
@@ -728,6 +729,17 @@ export class Hub {
           to.forEach(o => { if (!this.blocked(U, o) && !this.lim('scn' + o + r.id, 1, 10 * 60000)) this.notify(o, { title: '💬 ' + name + ' on ' + (o === r.u ? 'your rig' : 'a Showroom post'), body: x.slice(0, 120), tag: 'sr' + r.id, urg: 'low' }); }); }
         const nc = this.q('SELECT count(*) AS c FROM rlc WHERE id=?', r.id)[0].c; this.sql.exec('UPDATE rlp SET nc=? WHERE id=?', nc, r.id); return json({ ok: true, nc }); }
       return err('bad op'); }
+    if (p === 'crash') { // anonymous: message, app version, phone type. Never the rider, never a location
+      if (this.lim('cr' + ih, 40, DAY)) return json({ ok: true, skip: true });
+      const L = Array.isArray(b.r) ? b.r.slice(0, 5) : [], dev = clean(b.dev, 80);
+      L.forEach(x => { if (!x || typeof x !== 'object') return; const st = {}; const s0 = x.s && typeof x.s === 'object' ? x.s : {};
+        ['v', 'up', 'z', 'gl', 'd3', 'nav', 'map', 'mem', 'tiles', 'ram', 'app', 'perf', 'sat', 'fx', 'scr'].forEach(k => { if (s0[k] != null) st[k] = String(s0[k]).slice(0, 40); });
+        this.sql.exec('INSERT INTO crashes (t, v, k, m, s, dev) VALUES (?, ?, ?, ?, ?, ?)', Math.min(now, +x.t || now), clean(String(st.v || b.v || ''), 12), clean(x.k, 40), String(x.m || '').replace(/-?\d{1,3}\.\d{3,}/g, '#').slice(0, 600), JSON.stringify(st), dev); });
+      this.sql.exec('DELETE FROM crashes WHERE t<? OR id<=(SELECT id FROM crashes ORDER BY id DESC LIMIT 1 OFFSET 3000)', now - 30 * DAY);
+      return json({ ok: true }); }
+    if (p === 'crashes') { if (!isAdmin) return err('Only the AwareBC owner can see crash reports', 403);
+      if (b.op === 'clear') { this.sql.exec('DELETE FROM crashes'); return json({ ok: true }); }
+      return json({ r: this.q('SELECT t, v, k, m, s, dev FROM crashes ORDER BY id DESC LIMIT 300'), top: this.q('SELECT k, m, count(*) AS n, max(t) AS t, max(v) AS v FROM crashes GROUP BY k, m ORDER BY n DESC LIMIT 30') }); }
     if (p === 'myplaces') return json({ ids: this.q('SELECT id FROM places WHERE u=?', U).map(r => r.id), admin: isAdmin });
     if (p === 'backup') { // settings backup for signed-in riders (home pin, map choices), max 60 KB
       if (b.op === 'put') { const v = String(b.v || ''); if (v.length > 60000) return err('backup too big'); try { JSON.parse(v); } catch (e) { return err('bad backup'); } this.sql.exec('INSERT OR REPLACE INTO backups (u, v, t) VALUES (?, ?, ?)', U, v, now); return json({ ok: true, t: now }); }
