@@ -274,6 +274,7 @@ export class Hub {
     try { this.sql.exec('ALTER TABLE rlpf ADD COLUMN rc TEXT'); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rln ADD COLUMN hd INTEGER'); } catch (e) {}
     try { this.sql.exec('ALTER TABLE rlg ADD COLUMN hd INTEGER'); } catch (e) {}
+    this.sql.exec('CREATE TABLE IF NOT EXISTS logins (un TEXT PRIMARY KEY, u TEXT, salt TEXT, vh TEXT, enc TEXT, t INTEGER)'); this.sql.exec('CREATE INDEX IF NOT EXISTS logins_u ON logins(u)'); // rider name + password: the server keeps only a salted check of a value derived on the phone, and the rider key locked with the password
     this.sql.exec('CREATE TABLE IF NOT EXISTS crashes (id INTEGER PRIMARY KEY AUTOINCREMENT, t INTEGER, v TEXT, k TEXT, m TEXT, s TEXT, dev TEXT)'); // anonymous crash reports (no rider ID, no location)
     this.sql.exec('CREATE TABLE IF NOT EXISTS rlfo (u TEXT, f TEXT, t INTEGER, PRIMARY KEY (u, f))'); // Showroom: rider u follows rider f // rig type for the map pin (pickup, van, suv…)
     try { this.sql.exec('ALTER TABLE chk ADD COLUMN pushed INTEGER DEFAULT 0'); } catch (e) {}
@@ -312,6 +313,7 @@ export class Hub {
     /* full account deletion: badges, keys, nearby spot, places and flags this rider made */
     this.sql.exec('DELETE FROM rlk WHERE u=?', u); this.sql.exec('DELETE FROM rlb WHERE u=?', u); this.sql.exec('DELETE FROM rlba WHERE u=? OR by=?', u, u); this.sql.exec('DELETE FROM rln WHERE u=?', u);
     this.sql.exec('DELETE FROM pflags WHERE by=?', u); this.q('SELECT id FROM places WHERE u=?', u).forEach(r => { this.sql.exec('DELETE FROM pflags WHERE id=?', r.id); this.sql.exec('DELETE FROM places WHERE id=?', r.id); });
+    this.sql.exec('DELETE FROM logins WHERE u=?', u);
     this.sql.exec('DELETE FROM riders WHERE u=?', u);
   }
   rlDel(id) { const r = this.q('SELECT img, au, imgs FROM rlp WHERE id=?', id)[0]; if (!r) return; let ex = []; try { ex = JSON.parse(r.imgs || '[]'); } catch (e) {}
@@ -731,6 +733,21 @@ export class Hub {
         if (r.kind === 's') { const to = new Set(); if (r.u && r.u !== U) to.add(r.u); const rc = re && this.q('SELECT u FROM rlc WHERE cid=? AND id=?', re, r.id)[0]; if (rc && rc.u && rc.u !== U) to.add(rc.u);
           to.forEach(o => { if (!this.blocked(U, o) && !this.lim('scn' + o + r.id, 1, 10 * 60000)) this.notify(o, { title: '💬 ' + name + ' on ' + (o === r.u ? 'your rig' : 'a Showroom post'), body: x.slice(0, 120), tag: 'sr' + r.id, urg: 'low' }); }); }
         const nc = this.q('SELECT count(*) AS c FROM rlc WHERE id=?', r.id)[0].c; this.sql.exec('UPDATE rlp SET nc=? WHERE id=?', nc, r.id); return json({ ok: true, nc }); }
+      return err('bad op'); }
+    if (p === 'login') { // easy accounts: a rider name + password that bring the rider key back on any phone
+      const un = String(b.un || '').toLowerCase().trim(), auth = String(b.auth || '');
+      if (b.op === 'status') { const r = this.q('SELECT un, t FROM logins WHERE u=?', U)[0]; return json({ un: r ? r.un : null, t: r ? r.t : 0 }); }
+      if (!/^[a-z0-9._]{3,20}$/.test(un)) return err('Rider names are 3–20 letters, numbers, dots or underscores.');
+      if (b.op === 'check') { const r = this.q('SELECT u FROM logins WHERE un=?', un)[0]; return json({ free: !r || r.u === U }); }
+      if (!/^[0-9a-f]{64}$/.test(auth)) return err('bad login');
+      if (b.op === 'create') { const enc = String(b.enc || ''); if (!/^[A-Za-z0-9+/=]{40,400}$/.test(enc)) return err('bad login');
+        if (this.lim('lc' + U, 10, DAY)) return err('Too many tries today.', 429);
+        const ex = this.q('SELECT u FROM logins WHERE un=?', un)[0]; if (ex && ex.u !== U) return err('That rider name is taken. Try another.');
+        const salt = [...crypto.getRandomValues(new Uint8Array(16))].map(x => x.toString(16).padStart(2, '0')).join(''), vh = await sha(salt + auth);
+        this.sql.exec('DELETE FROM logins WHERE u=?', U); this.sql.exec('INSERT OR REPLACE INTO logins (un, u, salt, vh, enc, t) VALUES (?, ?, ?, ?, ?, ?)', un, U, salt, vh, enc, now); return json({ ok: true, un }); }
+      if (b.op === 'get') { if (this.lim('lg' + un, 10, HOUR) || this.lim('lgi' + ih, 30, HOUR)) return err('Too many tries. Wait an hour and try again.', 429);
+        const r = this.q('SELECT salt, vh, enc FROM logins WHERE un=?', un)[0]; if (!r || (await sha(r.salt + auth)) !== r.vh) return err('Rider name or password is wrong.');
+        return json({ enc: r.enc }); }
       return err('bad op'); }
     if (p === 'crash') { // anonymous: message, app version, phone type. Never the rider, never a location
       if (this.lim('cr' + ih, 40, DAY)) return json({ ok: true, skip: true });
